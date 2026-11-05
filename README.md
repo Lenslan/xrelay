@@ -99,7 +99,7 @@ bash xrelay.sh landing|relay|realm|info|uninstall|help|menu
 ## 四、realm 模式（备选）
 
 ```bash
-bash <(curl -Ls <脚本地址>) realm LADDR=落地机IP LPORT=443 RPORT=443
+bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh) realm LADDR=落地机IP LPORT=443 RPORT=443
 ```
 
 - 客户端用法：把**落地节点**的服务器地址改成中转机 IP、端口改成 `RPORT`，其他参数不动
@@ -115,7 +115,7 @@ bash <(curl -Ls <脚本地址>) realm LADDR=落地机IP LPORT=443 RPORT=443
 三个订阅文件里。
 
 ```bash
-bash <(curl -Ls <脚本地址>) mirror SUBURL=http://落地机IP:35948/你的subid
+bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh) mirror SUBURL=http://落地机IP:35948/你的subid
 ```
 
 - `SUBURL` 粘贴落地机的任意一条订阅地址即可（clmi.yaml / jhsub.txt / sbox.json 都行）
