@@ -28,6 +28,7 @@ VLESS-Vision-Reality，一条命令部署，自动生成所有节点链接。
 
 **结论**：默认用 Xray 链式，一个端口解决"中转 + 直连"两个需求；如果你的落地不是
 VLESS-Vision-Reality（比如想换 Hysteria2、Trojan 等），用 realm 模式。
+两台机器都已经用 argosbx 调通的，直接用第五节 mirror 模式，落地机完全不用动。
 
 ---
 
@@ -86,6 +87,7 @@ bash xrelay.sh landing|relay|realm|info|uninstall|help|menu
 | `UUID` / `DUUID` | relay | 中转节点 UUID / 直连节点 UUID |
 | `NAME` / `DNAME` | relay | 中转节点名 / 直连节点名 |
 | `UDP=y` | realm | 同时转发 UDP（默认 n） |
+| `SUBURL` / `BASE` / `UDP` / `PREFIX` | mirror | 落地订阅地址 / 端口起始值 / 是否镜像UDP节点 / 名称前缀 |
 | `FORCE=y` / `PURGE=y` | uninstall | 免确认 / 连 xray、realm 可执行文件一起删除 |
 
 `LPBK` 就是落地节点分享链接里的 `pbk=`，`LSID` 就是 `sid=`，`LSNI` 就是 `sni=`，
@@ -106,7 +108,32 @@ bash <(curl -Ls <脚本地址>) realm LADDR=落地机IP LPORT=443 RPORT=443
 
 ---
 
-## 五、常见问题
+## 五、mirror 模式：跟随落地机订阅（argosbx 双机用户推荐）
+
+两台机器都已经用 argosbx 部署、订阅正常使用时，推荐这个模式：**落地机完全不用动**，
+在中转机上执行一次，把落地订阅里的所有节点批量镜像过来，并自动追加进中转机自己的
+三个订阅文件里。
+
+```bash
+bash <(curl -Ls <脚本地址>) mirror SUBURL=http://落地机IP:35948/你的subid
+```
+
+- `SUBURL` 粘贴落地机的任意一条订阅地址即可（clmi.yaml / jhsub.txt / sbox.json 都行）
+- 执行后中转机的 clmi.yaml / jhsub.txt / sbox.json 都会多出一批 `中转-xxx` 节点
+- hy2 / tuic 等 UDP 节点默认一并镜像；纯 TCP 环境或不需要时用 `UDP=n`
+- 镜像转发端口从 `BASE`（默认 42000）向后自动分配，重跑端口保持不变；
+  记得在 VPS 安全组放行对应的 TCP（及 UDP）端口范围
+- **落地机重跑 argosbx 之后，在中转机重跑一次 mirror 即可刷新订阅**
+- 说明：sbox.json 的更新需要机器上有 python3；订阅文件首次修改前会自动备份为
+  `*.xrelay-orig`；`xrelay uninstall` 会把镜像节点从订阅里自动移除
+
+什么时候用 mirror 而不是 relay/realm：mirror 不碰两侧任何现有服务，只在原订阅上
+做叠加，适合"argosbx 已经调通、尽量不引入新变量"的场景；relay 的单端口双节点
+方案则更适合从零开始部署。
+
+---
+
+## 六、常见问题
 
 **Q: 端口被占用 / 连不上？**
 脚本会自动放行 ufw/firewalld。还需确认 VPS 商家控制台的安全组放行了对应 TCP 端口。
@@ -137,12 +164,13 @@ relay 和 landing（除非端口、服务分开处理）。
 
 ---
 
-## 六、部署后在机器上生成的文件
+## 七、部署后在机器上生成的文件
 
 | 路径 | 说明 |
 | --- | --- |
 | `/usr/local/etc/xray/config.json` | Xray 配置（官方标准路径） |
 | `/etc/xrelay/landing.env` 等 | 本脚本保存的参数（600 权限） |
+| `/etc/xrelay/mirror.ports` | mirror 模式的端口映射（重跑保持稳定） |
 | `/root/xrelay-nodes.txt` | 中转机生成的节点链接备份 |
 | `/etc/realm/config.toml` | realm 模式配置 |
 | `/etc/systemd/system/realm.service` | realm 服务 |
