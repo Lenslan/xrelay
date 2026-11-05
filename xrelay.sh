@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  xrelay.sh  v1.0.0  (2026-11-05)
+#  xrelay.sh  v1.0.1  (2026-11-05)
 #
 #  中转机 + 落地机 一键部署脚本  (Xray VLESS-Vision-Reality)
 #
@@ -20,7 +20,7 @@ set -u
 
 [[ ${BASH_VERSINFO[0]:-0} -ge 4 ]] || { echo "需要 bash 4.0 及以上版本"; exit 1; }
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 DEFAULT_SNI="aws.amazon.com"
 
 C_RESET=$'\033[0m'
@@ -251,6 +251,7 @@ install_xray() {
 
 test_config() { # 用真实核心校验配置; 兼容新旧命令行写法
   local f=$1
+  mkdir -p "$(dirname "$TESTLOG")" 2>/dev/null || true
   "$XRAY_BIN" run -test -config "$f" >"$TESTLOG" 2>&1 && return 0
   "$XRAY_BIN" -test -config "$f" >>"$TESTLOG" 2>&1 && return 0
   return 1
@@ -390,7 +391,7 @@ apply_xray_config() {
   local src=$1 real=$XRAY_CONFIG
   if dry; then printf '  [DRYRUN] 跳过安装配置与重启服务 (配置已生成于 %s)\n' "$src"; return 0; fi
   mkdir -p "$(dirname "$real")"
-  if [[ -s $real ]] && ! grep -q 'xrelay' "$real"; then
+  if [[ -s $real ]] && ! grep -q 'xrelay' "$real" && grep -qE '"(inbounds|outbounds)"' "$real"; then
     local bak="${real}.bak.$(date +%s)"
     cp -a "$real" "$bak"
     warn "检测到其他脚本的 xray 配置, 已备份到 $bak"
@@ -918,7 +919,7 @@ main() {
   shift 2>/dev/null || true
   for a in "$@"; do case $a in *=*) export "$a" ;; esac; done
   case "$MODE" in -h|--help) MODE=help ;; esac
-  dry && mkdir -p "$DRYDIR"
+  mkdir -p "$DRYDIR" 2>/dev/null || true
   case "$MODE" in
     landing)   self_install; do_landing ;;
     relay)     self_install; do_relay ;;
