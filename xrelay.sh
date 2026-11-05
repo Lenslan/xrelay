@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  xrelay.sh  v1.1.0  (2026-11-05)
+#  xrelay.sh  v1.1.1  (2026-11-05)
 #
 #  中转机 + 落地机 一键部署脚本  (Xray VLESS-Vision-Reality)
 #
@@ -22,7 +22,7 @@ set -u
 
 [[ ${BASH_VERSINFO[0]:-0} -ge 4 ]] || { echo "需要 bash 4.0 及以上版本"; exit 1; }
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 DEFAULT_SNI="aws.amazon.com"
 
 C_RESET=$'\033[0m'
@@ -46,9 +46,10 @@ have_bin() { command -v "$1" >/dev/null 2>&1; }
 
 XRAY_BIN=${XRAY_BIN:-xray}
 XRAY_CONFIG=/usr/local/etc/xray/config.json
-REALM_BIN=/usr/local/bin/realm
-REALM_CONFIG=/etc/realm/config.toml
-REALM_UNIT=/etc/systemd/system/realm.service
+REALM_BIN=${REALM_BIN:-/usr/local/bin/realm}
+REALM_CONFIG=${REALM_CONFIG:-/etc/realm/config.toml}
+REALM_UNIT=${REALM_UNIT:-/etc/systemd/system/realm.service}
+REALM_INIT=${REALM_INIT:-/etc/init.d/realm}
 NODES_FILE=/root/xrelay-nodes.txt
 DRYDIR=${DRYDIR:-/tmp/xrelay-dry}
 TESTLOG="${DRYDIR}/xray-test.log"
@@ -82,6 +83,8 @@ ensure_deps() {
     dnf install -y -q "${miss[@]}" >/dev/null 2>&1 || true
   elif have_bin yum; then
     yum install -y -q "${miss[@]}" >/dev/null 2>&1 || true
+  elif have_bin apk; then
+    apk add --no-cache "${miss[@]}" >/dev/null 2>&1 || true
   fi
   for p in "${miss[@]}"; do have_bin "$p" || die "缺少依赖 $p, 请手动安装后重试"; done
 }
@@ -150,8 +153,9 @@ enable_bbr() {
     return 0
   fi
   modprobe tcp_bbr 2>/dev/null || true
+  mkdir -p /etc/sysctl.d 2>/dev/null || true
   printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' > /etc/sysctl.d/99-xrelay-bbr.conf 2>/dev/null || true
-  sysctl --system >/dev/null 2>&1 || true
+  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-xrelay-bbr.conf >/dev/null 2>&1 || true
   if sysctl net.ipv4.tcp_congestion_control 2>/dev/null | grep -q bbr; then
     ok "已启用 BBR 加速"
   else
@@ -240,6 +244,9 @@ install_xray() {
   if dry; then
     printf '  [DRYRUN] 跳过 Xray 安装 (测试用 XRAY_BIN=%s)\n' "$XRAY_BIN"
     return 0
+  fi
+  if [[ ! -d /run/systemd/system ]] || ! have_bin systemctl; then
+    die "landing/relay 模式依赖 Xray 官方安装脚本, 需要 systemd 系统; Alpine 等系统请使用 realm/mirror 模式"
   fi
   if have_bin xray; then
     info "已安装 Xray: $(xray version 2>/dev/null | head -n1)"
@@ -628,15 +635,16 @@ EOF
 }
 
 start_realm() {
-  if dry; then printf '  [DRYRUN] 写入 %s 并启动 realm 服务\n' "$REALM_UNIT"; return 0; fi
-  cat > "$REALM_UNIT" <<EOF
+  if dry; then printf '  [DRYRUN] 启动 realm 服务\n'; return 0; fi
+  if [[ -d /run/systemd/system ]] && have_bin systemctl; then
+    cat > "$REALM_UNIT" <<EOF
 [Unit]
 Description=Realm TCP/UDP Relay (xrelay)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/realm -c ${REALM_CONFIG}
+ExecStart=${REALM_BIN} -c ${REALM_CONFIG}
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
@@ -644,16 +652,56 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
-  systemctl enable realm >/dev/null 2>&1 || true
-  systemctl restart realm
-  sleep 1
-  if ! systemctl is-active --quiet realm; then
-    log "----- journalctl -u realm (最后 20 行) -----"
-    journalctl -u realm -n 20 --no-pager 2>/dev/null || true
-    die "realm 启动失败, 请查看上方日志"
+    systemctl daemon-reload
+    systemctl enable realm >/dev/null 2>&1 || true
+    systemctl restart realm
+    sleep 1
+    if ! systemctl is-active --quiet realm; then
+      log "----- journalctl -u realm (最后 20 行) -----"
+      journalctl -u realm -n 20 --no-pager 2>/dev/null || true
+      die "realm 启动失败, 请查看上方日志"
+    fi
+    ok "realm 服务运行中 (systemd)"
+  elif have_bin rc-service && have_bin rc-update; then
+    cat > "$REALM_INIT" <<EOF
+#!/sbin/openrc-run
+description="Realm TCP/UDP Relay (xrelay)"
+command="${REALM_BIN}"
+command_args="-c ${REALM_CONFIG}"
+command_background=true
+pidfile="/run/realm.pid"
+output_log="/var/log/realm.log"
+error_log="/var/log/realm.log"
+EOF
+    chmod 755 "$REALM_INIT"
+    rc-update add realm default >/dev/null 2>&1 || true
+    rc-service realm restart >/dev/null 2>&1 || true
+    sleep 1
+    if ! rc-service realm status >/dev/null 2>&1; then
+      log "----- /var/log/realm.log (最后 20 行) -----"
+      tail -n 20 /var/log/realm.log 2>/dev/null || true
+      die "realm 启动失败(OpenRC), 请查看上方日志"
+    fi
+    ok "realm 服务运行中 (OpenRC)"
+  else
+    pkill -f "realm -c" >/dev/null 2>&1 || true
+    nohup "$REALM_BIN" -c "$REALM_CONFIG" >>/var/log/realm.log 2>&1 &
+    sleep 1
+    if ! pgrep -f "realm -c" >/dev/null 2>&1; then
+      log "----- /var/log/realm.log (最后 20 行) -----"
+      tail -n 20 /var/log/realm.log 2>/dev/null || true
+      die "realm 启动失败, 请查看上方日志"
+    fi
+    rm -f /tmp/xrelay-cron.tmp
+    { crontab -l 2>/dev/null | grep -v 'xrelay-realm' || true; } > /tmp/xrelay-cron.tmp 2>/dev/null || true
+    echo "@reboot sleep 10 && $REALM_BIN -c $REALM_CONFIG >>/var/log/realm.log 2>&1 # xrelay-realm" >> /tmp/xrelay-cron.tmp
+    if crontab /tmp/xrelay-cron.tmp 2>/dev/null; then
+      ok "realm 已启动 (无服务管理器模式, crontab 开机自启已配置)"
+    else
+      warn "realm 已启动, 但 crontab 不可用; 重启机器后需手动运行: $REALM_BIN -c $REALM_CONFIG &"
+    fi
+    rm -f /tmp/xrelay-cron.tmp
   fi
-  ok "realm 服务运行中"
 }
 
 show_realm_summary() {
@@ -1165,7 +1213,7 @@ do_mirror() {
         esac
         if printf '%s' "$lk" | grep -q 'alpn=h3'; then warn "UDP=n, 跳过 QUIC(h3) 节点链接: ${lname:-link}"; continue; fi
       fi
-      lkey=$(mirror_link_key "$lk") || { warn "无法解析链接, 跳过: ${lk:0:60}"; continue; }
+      lkey=$(mirror_link_key "$lk") || { warn "无法解析链接(缺服务器地址或格式不支持), 跳过: ${lk:0:70}"; continue; }
       mirror_alloc "$lkey"; lnp=$MIRROR_PORT
       { mirror_link_rewrite "$lk" "$ADDR" "$lnp"; printf '\n'; } >> "$links_new"
     done < "$tmpd/land_jhsub.txt"
@@ -1298,14 +1346,20 @@ do_info() {
     log ""
   fi
   ((found)) || info "未发现本脚本的部署记录 (landing / relay / realm / mirror)"
-  if ! dry && have_bin systemctl; then
+  if ! dry; then
     local s st
-    for s in xray realm; do
-      if systemctl list-unit-files 2>/dev/null | grep -q "^$s.service"; then
-        st=$(systemctl is-active "$s" 2>/dev/null) || true
-        log "  服务 $s: ${st:-unknown}"
-      fi
-    done
+    if have_bin systemctl; then
+      for s in xray realm; do
+        if systemctl list-unit-files 2>/dev/null | grep -q "^$s.service"; then
+          st=$(systemctl is-active "$s" 2>/dev/null) || true
+          log "  服务 $s: ${st:-unknown}"
+        fi
+      done
+    fi
+    if have_bin rc-service && [[ -f $REALM_INIT ]]; then
+      st=$(rc-service realm status 2>&1 | head -n1) || true
+      log "  服务 realm(OpenRC): ${st:-unknown}"
+    fi
   fi
   if [[ -f $(nodes_file) ]]; then
     log ""
@@ -1335,12 +1389,23 @@ do_uninstall() {
     elif [[ -f $XRAY_CONFIG ]]; then
       warn "当前 xray 配置不是本脚本生成的, 未改动"
     fi
+    if [[ -f $REALM_INIT ]]; then
+      rc-service realm stop >/dev/null 2>&1 || true
+      rc-update del realm default >/dev/null 2>&1 || true
+      rm -f "$REALM_INIT"
+      ok "已停止并移除 realm 服务 (OpenRC)"
+    fi
     if [[ -f $REALM_UNIT ]]; then
       systemctl stop realm 2>/dev/null || true
       systemctl disable realm 2>/dev/null || true
       rm -f "$REALM_UNIT"
       systemctl daemon-reload 2>/dev/null || true
-      ok "已停止并移除 realm 服务"
+      ok "已停止并移除 realm 服务 (systemd)"
+    fi
+    pkill -f 'realm -c' >/dev/null 2>&1 || true
+    if have_bin crontab && crontab -l 2>/dev/null | grep -q 'xrelay-realm'; then
+      { crontab -l 2>/dev/null | grep -v 'xrelay-realm' || true; } | crontab - 2>/dev/null || true
+      ok "已清理 realm 开机自启 (crontab)"
     fi
   else
     printf '  [DRYRUN] 停止服务 / 移除配置\n'

@@ -126,6 +126,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh)
 - **落地机重跑 argosbx 之后，在中转机重跑一次 mirror 即可刷新订阅**
 - 说明：sbox.json 的更新需要机器上有 python3；订阅文件首次修改前会自动备份为
   `*.xrelay-orig`；`xrelay uninstall` 会把镜像节点从订阅里自动移除
+- 系统兼容：Alpine / OpenRC 系统同样可用，realm 会以 OpenRC 服务托管并设置开机自启；
+  没有 systemd 也没有 OpenRC 的系统会自动回退到 crontab 自启
 
 什么时候用 mirror 而不是 relay/realm：mirror 不碰两侧任何现有服务，只在原订阅上
 做叠加，适合"argosbx 已经调通、尽量不引入新变量"的场景；relay 的单端口双节点
@@ -157,6 +159,11 @@ relay 和 landing（除非端口、服务分开处理）。
 **Q: 如何只允许中转机访问落地机？**
 落地机部署完成后可以用 ufw 收紧，例如：
 `ufw delete allow 443/tcp && ufw allow from <中转机IP> to any port 443 proto tcp`
+
+**Q: 中转机是 Alpine 系统可以吗？**
+可以。realm 和 mirror 模式已适配 OpenRC，会以 OpenRC 服务托管 realm 并设置开机自启；
+没有 OpenRC 和 systemd 的系统会自动回退到 crontab 自启。注意 landing / relay 模式依赖
+Xray 官方安装脚本，只能用在 systemd 系统上，Alpine 上请用 realm 或 mirror 模式。
 
 **Q: 更新 / 卸载？**
 重跑对应模式命令会自动更新 Xray 核心并保持原有 UUID/密钥不变（参数保存在
