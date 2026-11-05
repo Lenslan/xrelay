@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  xrelay.sh  v1.1.1  (2026-11-05)
+#  xrelay.sh  v1.3.0  (2026-11-05)
 #
 #  中转机 + 落地机 一键部署脚本  (Xray VLESS-Vision-Reality)
 #
@@ -9,6 +9,7 @@
 #              "中转节点"(流量走落地机出口) 与 "直连节点"(流量从本机出口)
 #    realm   : 中转替代方案, 纯 TCP 转发(兼容任意 TCP 落地协议, UDP 需自测)
 #    mirror  : 跟随落地机订阅, 把落地节点批量镜像到本机并更新本机订阅(推荐)
+#    rules   : 用内置或外部订阅(如机场配置)的规则段, 补充/替换本机订阅的分流规则
 #    info    : 查看已部署信息      uninstall: 卸载
 #    help    : 参数与用法说明      menu: 交互菜单(默认)
 #
@@ -17,12 +18,13 @@
 #    bash xrelay.sh relay LADDR=1.2.3.4 LPORT=443 LUUID=xxx LSNI=xxx LPBK=xxx LSID=xxx
 #    bash xrelay.sh realm LADDR=1.2.3.4 LPORT=443 RPORT=8443
 #    bash xrelay.sh mirror SUBURL=http://1.2.3.4:35948/123
+#    bash xrelay.sh rules
 # ============================================================================
 set -u
 
 [[ ${BASH_VERSINFO[0]:-0} -ge 4 ]] || { echo "需要 bash 4.0 及以上版本"; exit 1; }
 
-VERSION="1.1.1"
+VERSION="1.3.0"
 DEFAULT_SNI="aws.amazon.com"
 
 C_RESET=$'\033[0m'
@@ -1036,6 +1038,20 @@ json.dump(d, open(p, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
 PYEOF
     ok "已清理 $d/sbox.json 中的镜像节点"
   fi
+  if [[ -f "$d/clmi.yaml" ]] && grep -q 'xrelay-ruleproviders' "$d/clmi.yaml"; then
+    local ctmp
+    ctmp=$(mktemp)
+    sed -e '/# >>> xrelay-ruleproviders >>>/,/# <<< xrelay-ruleproviders <<</d' "$d/clmi.yaml" > "$ctmp" && cat "$ctmp" > "$d/clmi.yaml"
+    rm -f "$ctmp"
+    ok "已清理 $d/clmi.yaml 中的 rule-providers 插入块"
+  fi
+  if [[ -f "$d/clmi.yaml.rules-orig" && -f "$d/clmi.yaml" ]]; then
+    local rtmp
+    rtmp=$(mktemp)
+    { awk '/^rules:/{exit} {print}' "$d/clmi.yaml"; cat "$d/clmi.yaml.rules-orig"; } > "$rtmp" && cat "$rtmp" > "$d/clmi.yaml"
+    rm -f "$rtmp" "$d/clmi.yaml.rules-orig"
+    ok "已恢复 $d/clmi.yaml 的原始分流规则"
+  fi
 }
 
 write_mirror_realm_config() { # $1=配置路径 $2=true/false(udp) $3=端点表文件(port|host|port)
@@ -1299,6 +1315,659 @@ do_menu_mirror() {
   do_mirror
 }
 
+# ------------------------------- rules 模式 ---------------------------------
+# 用内置规则集或外部订阅(如机场配置 yaml)的 rules 段补充/替换本机 clmi.yaml 的分流规则
+
+# ------------------------------- 内置规则集 ---------------------------------
+# 来源: 糖果云订阅的 rules 段, 已内置到脚本; 运行时把其策略组目标映射到 GROUP,
+# DIRECT/REJECT/no-resolve 原样保留
+rules_builtin() {
+  cat <<'XRL_BUILTIN_RULES_EOF'
+    - 'DOMAIN,127.0.0.1:7010,DIRECT'
+    - 'DOMAIN-SUFFIX,services.googleapis.cn,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,xn--ngstr-lra8j.com,Candytally（糖果云）'
+    - 'DOMAIN,safebrowsing.urlsec.qq.com,DIRECT'
+    - 'DOMAIN,safebrowsing.googleapis.com,DIRECT'
+    - 'DOMAIN,developer.apple.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,digicert.com,Candytally（糖果云）'
+    - 'DOMAIN,ocsp.apple.com,Candytally（糖果云）'
+    - 'DOMAIN,ocsp.comodoca.com,Candytally（糖果云）'
+    - 'DOMAIN,ocsp.usertrust.com,Candytally（糖果云）'
+    - 'DOMAIN,ocsp.sectigo.com,Candytally（糖果云）'
+    - 'DOMAIN,ocsp.verisign.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,apple-dns.net,Candytally（糖果云）'
+    - 'DOMAIN,testflight.apple.com,Candytally（糖果云）'
+    - 'DOMAIN,sandbox.itunes.apple.com,Candytally（糖果云）'
+    - 'DOMAIN,itunes.apple.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,apps.apple.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,blobstore.apple.com,Candytally（糖果云）'
+    - 'DOMAIN,cvws.icloud-content.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,alpine,DIRECT'
+    - 'DOMAIN-SUFFIX,mzstatic.com,DIRECT'
+    - 'DOMAIN-SUFFIX,itunes.apple.com,DIRECT'
+    - 'DOMAIN-SUFFIX,icloud.com,DIRECT'
+    - 'DOMAIN-SUFFIX,icloud-content.com,DIRECT'
+    - 'DOMAIN-SUFFIX,me.com,DIRECT'
+    - 'DOMAIN-SUFFIX,aaplimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,cdn20.com,DIRECT'
+    - 'DOMAIN-SUFFIX,cdn-apple.com,DIRECT'
+    - 'DOMAIN-SUFFIX,akadns.net,DIRECT'
+    - 'DOMAIN-SUFFIX,akamaiedge.net,DIRECT'
+    - 'DOMAIN-SUFFIX,edgekey.net,DIRECT'
+    - 'DOMAIN-SUFFIX,mwcloudcdn.com,DIRECT'
+    - 'DOMAIN-SUFFIX,mwcname.com,DIRECT'
+    - 'DOMAIN-SUFFIX,apple.com,DIRECT'
+    - 'DOMAIN-SUFFIX,apple-cloudkit.com,DIRECT'
+    - 'DOMAIN-SUFFIX,apple-mapkit.com,DIRECT'
+    - 'DOMAIN-SUFFIX,126.com,DIRECT'
+    - 'DOMAIN-SUFFIX,126.net,DIRECT'
+    - 'DOMAIN-SUFFIX,127.net,DIRECT'
+    - 'DOMAIN-SUFFIX,163.com,DIRECT'
+    - 'DOMAIN-SUFFIX,360buyimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,36kr.com,DIRECT'
+    - 'DOMAIN-SUFFIX,acfun.tv,DIRECT'
+    - 'DOMAIN-SUFFIX,air-matters.com,DIRECT'
+    - 'DOMAIN-SUFFIX,aixifan.com,DIRECT'
+    - 'DOMAIN-KEYWORD,alicdn,DIRECT'
+    - 'DOMAIN-KEYWORD,alipay,DIRECT'
+    - 'DOMAIN-KEYWORD,taobao,DIRECT'
+    - 'DOMAIN-SUFFIX,amap.com,DIRECT'
+    - 'DOMAIN-SUFFIX,autonavi.com,DIRECT'
+    - 'DOMAIN-KEYWORD,baidu,DIRECT'
+    - 'DOMAIN-SUFFIX,bdimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,bdstatic.com,DIRECT'
+    - 'DOMAIN-SUFFIX,bilibili.com,DIRECT'
+    - 'DOMAIN-SUFFIX,bilivideo.com,DIRECT'
+    - 'DOMAIN-SUFFIX,caiyunapp.com,DIRECT'
+    - 'DOMAIN-SUFFIX,clouddn.com,DIRECT'
+    - 'DOMAIN-SUFFIX,cnbeta.com,DIRECT'
+    - 'DOMAIN-SUFFIX,cnbetacdn.com,DIRECT'
+    - 'DOMAIN-SUFFIX,cootekservice.com,DIRECT'
+    - 'DOMAIN-SUFFIX,csdn.net,DIRECT'
+    - 'DOMAIN-SUFFIX,ctrip.com,DIRECT'
+    - 'DOMAIN-SUFFIX,dgtle.com,DIRECT'
+    - 'DOMAIN-SUFFIX,dianping.com,DIRECT'
+    - 'DOMAIN-SUFFIX,douban.com,DIRECT'
+    - 'DOMAIN-SUFFIX,doubanio.com,DIRECT'
+    - 'DOMAIN-SUFFIX,duokan.com,DIRECT'
+    - 'DOMAIN-SUFFIX,easou.com,DIRECT'
+    - 'DOMAIN-SUFFIX,ele.me,DIRECT'
+    - 'DOMAIN-SUFFIX,feng.com,DIRECT'
+    - 'DOMAIN-SUFFIX,fir.im,DIRECT'
+    - 'DOMAIN-SUFFIX,frdic.com,DIRECT'
+    - 'DOMAIN-SUFFIX,g-cores.com,DIRECT'
+    - 'DOMAIN-SUFFIX,godic.net,DIRECT'
+    - 'DOMAIN-SUFFIX,gtimg.com,DIRECT'
+    - 'DOMAIN,cdn.hockeyapp.net,DIRECT'
+    - 'DOMAIN-SUFFIX,hongxiu.com,DIRECT'
+    - 'DOMAIN-SUFFIX,hxcdn.net,DIRECT'
+    - 'DOMAIN-SUFFIX,iciba.com,DIRECT'
+    - 'DOMAIN-SUFFIX,ifeng.com,DIRECT'
+    - 'DOMAIN-SUFFIX,ifengimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,ipip.net,DIRECT'
+    - 'DOMAIN-SUFFIX,iqiyi.com,DIRECT'
+    - 'DOMAIN-SUFFIX,jd.com,DIRECT'
+    - 'DOMAIN-SUFFIX,jianshu.com,DIRECT'
+    - 'DOMAIN-SUFFIX,knewone.com,DIRECT'
+    - 'DOMAIN-SUFFIX,le.com,DIRECT'
+    - 'DOMAIN-SUFFIX,lecloud.com,DIRECT'
+    - 'DOMAIN-SUFFIX,lemicp.com,DIRECT'
+    - 'DOMAIN-SUFFIX,licdn.com,DIRECT'
+    - 'DOMAIN-SUFFIX,luoo.net,DIRECT'
+    - 'DOMAIN-SUFFIX,meituan.com,DIRECT'
+    - 'DOMAIN-SUFFIX,meituan.net,DIRECT'
+    - 'DOMAIN-SUFFIX,mi.com,DIRECT'
+    - 'DOMAIN-SUFFIX,miaopai.com,DIRECT'
+    - 'DOMAIN-SUFFIX,microsoft.com,DIRECT'
+    - 'DOMAIN-SUFFIX,microsoftonline.com,DIRECT'
+    - 'DOMAIN-SUFFIX,miui.com,DIRECT'
+    - 'DOMAIN-SUFFIX,miwifi.com,DIRECT'
+    - 'DOMAIN-SUFFIX,mob.com,DIRECT'
+    - 'DOMAIN-SUFFIX,netease.com,DIRECT'
+    - 'DOMAIN-SUFFIX,office.com,DIRECT'
+    - 'DOMAIN-SUFFIX,office365.com,DIRECT'
+    - 'DOMAIN-KEYWORD,officecdn,DIRECT'
+    - 'DOMAIN-SUFFIX,oschina.net,DIRECT'
+    - 'DOMAIN-SUFFIX,ppsimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,pstatp.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qcloud.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qdaily.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qdmm.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qhimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qhres.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qidian.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qihucdn.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qiniu.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qiniucdn.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qiyipic.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qq.com,DIRECT'
+    - 'DOMAIN-SUFFIX,qqurl.com,DIRECT'
+    - 'DOMAIN-SUFFIX,rarbg.to,DIRECT'
+    - 'DOMAIN-SUFFIX,ruguoapp.com,DIRECT'
+    - 'DOMAIN-SUFFIX,segmentfault.com,DIRECT'
+    - 'DOMAIN-SUFFIX,sinaapp.com,DIRECT'
+    - 'DOMAIN-SUFFIX,smzdm.com,DIRECT'
+    - 'DOMAIN-SUFFIX,snapdrop.net,DIRECT'
+    - 'DOMAIN-SUFFIX,sogou.com,DIRECT'
+    - 'DOMAIN-SUFFIX,sogoucdn.com,DIRECT'
+    - 'DOMAIN-SUFFIX,sohu.com,DIRECT'
+    - 'DOMAIN-SUFFIX,soku.com,DIRECT'
+    - 'DOMAIN-SUFFIX,speedtest.net,DIRECT'
+    - 'DOMAIN-SUFFIX,sspai.com,DIRECT'
+    - 'DOMAIN-SUFFIX,suning.com,DIRECT'
+    - 'DOMAIN-SUFFIX,taobao.com,DIRECT'
+    - 'DOMAIN-SUFFIX,tencent.com,DIRECT'
+    - 'DOMAIN-SUFFIX,tenpay.com,DIRECT'
+    - 'DOMAIN-SUFFIX,tianyancha.com,DIRECT'
+    - 'DOMAIN-SUFFIX,tmall.com,DIRECT'
+    - 'DOMAIN-SUFFIX,tudou.com,DIRECT'
+    - 'DOMAIN-SUFFIX,umetrip.com,DIRECT'
+    - 'DOMAIN-SUFFIX,upaiyun.com,DIRECT'
+    - 'DOMAIN-SUFFIX,upyun.com,DIRECT'
+    - 'DOMAIN-SUFFIX,veryzhun.com,DIRECT'
+    - 'DOMAIN-SUFFIX,weather.com,DIRECT'
+    - 'DOMAIN-SUFFIX,weibo.com,DIRECT'
+    - 'DOMAIN-SUFFIX,xiami.com,DIRECT'
+    - 'DOMAIN-SUFFIX,xiami.net,DIRECT'
+    - 'DOMAIN-SUFFIX,xiaomicp.com,DIRECT'
+    - 'DOMAIN-SUFFIX,ximalaya.com,DIRECT'
+    - 'DOMAIN-SUFFIX,xmcdn.com,DIRECT'
+    - 'DOMAIN-SUFFIX,xunlei.com,DIRECT'
+    - 'DOMAIN-SUFFIX,yhd.com,DIRECT'
+    - 'DOMAIN-SUFFIX,yihaodianimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,yinxiang.com,DIRECT'
+    - 'DOMAIN-SUFFIX,ykimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,youdao.com,DIRECT'
+    - 'DOMAIN-SUFFIX,youku.com,DIRECT'
+    - 'DOMAIN-SUFFIX,zealer.com,DIRECT'
+    - 'DOMAIN-SUFFIX,zhihu.com,DIRECT'
+    - 'DOMAIN-SUFFIX,zhimg.com,DIRECT'
+    - 'DOMAIN-SUFFIX,zimuzu.tv,DIRECT'
+    - 'DOMAIN-SUFFIX,zoho.com,DIRECT'
+    - 'DOMAIN-KEYWORD,amazon,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,google,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,gmail,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,youtube,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,facebook,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,fb.me,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,fbcdn.net,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,twitter,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,instagram,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,dropbox,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,twimg.com,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,blogspot,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,youtu.be,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,whatsapp,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,admarvel,REJECT'
+    - 'DOMAIN-KEYWORD,admaster,REJECT'
+    - 'DOMAIN-KEYWORD,adsage,REJECT'
+    - 'DOMAIN-KEYWORD,adsmogo,REJECT'
+    - 'DOMAIN-KEYWORD,adsrvmedia,REJECT'
+    - 'DOMAIN-KEYWORD,adwords,REJECT'
+    - 'DOMAIN-KEYWORD,adservice,REJECT'
+    - 'DOMAIN-SUFFIX,appsflyer.com,REJECT'
+    - 'DOMAIN-KEYWORD,domob,REJECT'
+    - 'DOMAIN-SUFFIX,doubleclick.net,REJECT'
+    - 'DOMAIN-KEYWORD,duomeng,REJECT'
+    - 'DOMAIN-KEYWORD,dwtrack,REJECT'
+    - 'DOMAIN-KEYWORD,guanggao,REJECT'
+    - 'DOMAIN-KEYWORD,lianmeng,REJECT'
+    - 'DOMAIN-SUFFIX,mmstat.com,REJECT'
+    - 'DOMAIN-KEYWORD,mopub,REJECT'
+    - 'DOMAIN-KEYWORD,omgmta,REJECT'
+    - 'DOMAIN-KEYWORD,openx,REJECT'
+    - 'DOMAIN-KEYWORD,partnerad,REJECT'
+    - 'DOMAIN-KEYWORD,pingfore,REJECT'
+    - 'DOMAIN-KEYWORD,supersonicads,REJECT'
+    - 'DOMAIN-KEYWORD,uedas,REJECT'
+    - 'DOMAIN-KEYWORD,umeng,REJECT'
+    - 'DOMAIN-KEYWORD,usage,REJECT'
+    - 'DOMAIN-SUFFIX,vungle.com,REJECT'
+    - 'DOMAIN-KEYWORD,wlmonitor,REJECT'
+    - 'DOMAIN-KEYWORD,zjtoolbar,REJECT'
+    - 'DOMAIN-SUFFIX,9to5mac.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,abpchina.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,adblockplus.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,adobe.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,akamaized.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,alfredapp.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,amplitude.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ampproject.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,android.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,angularjs.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,aolcdn.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,apkpure.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,appledaily.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,appshopper.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,appspot.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,arcgis.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,archive.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,armorgames.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,aspnetcdn.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,att.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,awsstatic.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,azureedge.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,azurewebsites.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,bing.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,bintray.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,bit.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,bit.ly,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,bitbucket.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,bjango.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,bkrtx.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,blog.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,blogcdn.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,blogger.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,blogsmithmedia.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,blogspot.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,blogspot.hk,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,bloomberg.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,box.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,box.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,cachefly.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,chromium.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,cl.ly,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,cloudflare.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,cloudfront.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,cloudmagic.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,cmail19.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,cnet.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,cocoapods.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,comodoca.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,crashlytics.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,culturedcode.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,d.pr,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,danilo.to,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,dayone.me,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,db.tt,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,deskconnect.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,disq.us,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,disqus.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,disquscdn.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,dnsimple.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,docker.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,dribbble.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,droplr.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,duckduckgo.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,dueapp.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,dytt8.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,edgecastcdn.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,edgekey.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,edgesuite.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,engadget.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,entrust.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,eurekavpt.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,evernote.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,fabric.io,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,fast.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,fastly.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,fc2.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,feedburner.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,feedly.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,feedsportal.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,fiftythree.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,firebaseio.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,flexibits.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,flickr.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,flipboard.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,g.co,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,gabia.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,geni.us,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,gfx.ms,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ggpht.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ghostnoteapp.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,git.io,Candytally（糖果云）'
+    - 'DOMAIN-KEYWORD,github,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,globalsign.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,gmodules.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,godaddy.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,golang.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,gongm.in,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,goo.gl,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,goodreaders.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,goodreads.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,gravatar.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,gstatic.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,gvt0.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,hockeyapp.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,hotmail.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,icons8.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ifixit.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ift.tt,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ifttt.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,iherb.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,imageshack.us,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,img.ly,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,imgur.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,imore.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,instapaper.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ipn.li,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,is.gd,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,issuu.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,itgonglun.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,itun.es,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ixquick.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,j.mp,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,js.revsci.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,jshint.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,jtvnw.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,justgetflux.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,kat.cr,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,klip.me,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,libsyn.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,linkedin.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,line-apps.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,linode.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,lithium.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,littlehj.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,live.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,live.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,livefilestore.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,llnwd.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,macid.co,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,macromedia.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,macrumors.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,mashable.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,mathjax.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,medium.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,mega.co.nz,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,mega.nz,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,megaupload.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,microsofttranslator.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,mindnode.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,mobile01.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,modmyi.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,msedge.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,myfontastic.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,name.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,nextmedia.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,nsstatic.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,nssurge.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,nyt.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,nytimes.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,omnigroup.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,onedrive.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,onenote.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ooyala.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,openvpn.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,openwrt.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,orkut.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,osxdaily.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,outlook.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ow.ly,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,paddleapi.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,parallels.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,parse.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,pdfexpert.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,periscope.tv,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,pinboard.in,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,pinterest.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,pixelmator.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,pixiv.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,playpcesor.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,playstation.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,playstation.com.hk,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,playstation.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,playstationnetwork.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,pushwoosh.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,rime.im,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,servebom.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,sfx.ms,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,shadowsocks.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,sharethis.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,shazam.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,skype.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,smartdnsCandytally（糖果云）.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,smartmailcloud.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,sndcdn.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,sony.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,soundcloud.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,sourceforge.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,spotify.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,squarespace.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,sstatic.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,st.luluku.pw,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,stackoverflow.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,startpage.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,staticflickr.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,steamcommunity.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,symauth.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,symcb.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,symcd.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tapbots.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tapbots.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tdesktop.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,techcrunch.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,techsmith.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,thepiratebay.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,theverge.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,time.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,timeinc.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tiny.cc,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tinypic.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tmblr.co,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,todoist.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,trello.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,trustasiassl.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tumblr.co,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tumblr.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tweetdeck.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,tweetmarker.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,twitch.tv,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,txmblr.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,typekit.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ubertags.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ublock.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ubnt.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ulyssesapp.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,urchin.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,usertrust.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,v.gd,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,v2ex.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,vimeo.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,vimeocdn.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,vine.co,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,vivaldi.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,vox-cdn.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,vsco.co,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,vultr.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,w.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,w3schools.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,webtype.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wikiwand.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wikileaks.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wikimedia.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wikipedia.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wikipedia.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,windows.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,windows.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wire.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wordpress.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,workflowy.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wp.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wsj.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,wsj.net,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,xda-developers.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,xeeno.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,xiti.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,yahoo.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,yimg.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ying.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,yoyo.org,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,ytimg.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,telegra.ph,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,telegram.org,Candytally（糖果云）'
+    - 'IP-CIDR,91.108.4.0/22,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,91.108.8.0/21,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,91.108.16.0/22,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,91.108.56.0/22,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,149.154.160.0/20,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR6,2001:67c:4e8::/48,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR6,2001:b28:f23d::/48,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR6,2001:b28:f23f::/48,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,120.232.181.162/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,120.241.147.226/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,120.253.253.226/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,120.253.255.162/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,120.253.255.34/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,120.253.255.98/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,180.163.150.162/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,180.163.150.34/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,180.163.151.162/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,180.163.151.34/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,203.208.39.0/24,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,203.208.40.0/24,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,203.208.41.0/24,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,203.208.43.0/24,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,203.208.50.0/24,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,220.181.174.162/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,220.181.174.226/32,Candytally（糖果云）,no-resolve'
+    - 'IP-CIDR,220.181.174.34/32,Candytally（糖果云）,no-resolve'
+    - 'DOMAIN,injections.adguard.org,DIRECT'
+    - 'DOMAIN,local.adguard.org,DIRECT'
+    - 'DOMAIN-SUFFIX,local,DIRECT'
+    - 'IP-CIDR,127.0.0.0/8,DIRECT'
+    - 'IP-CIDR,172.16.0.0/12,DIRECT'
+    - 'IP-CIDR,192.168.0.0/16,DIRECT'
+    - 'IP-CIDR,10.0.0.0/8,DIRECT'
+    - 'IP-CIDR,17.0.0.0/8,DIRECT'
+    - 'IP-CIDR,100.64.0.0/10,DIRECT'
+    - 'IP-CIDR,224.0.0.0/4,DIRECT'
+    - 'IP-CIDR6,fe80::/10,DIRECT'
+    - 'DOMAIN-SUFFIX,cn,DIRECT'
+    - 'DOMAIN-KEYWORD,-cn,DIRECT'
+    - 'GEOIP,CN,DIRECT'
+    - 'MATCH,Candytally（糖果云）'
+XRL_BUILTIN_RULES_EOF
+}
+
+rules_extract_key() { # $1=yaml文件 $2=顶层键名 -> 输出该顶层键的完整段
+  awk -v key="$2" '
+    $0 ~ "^" key ":" { inp=1; print; next }
+    inp && /^[A-Za-z][A-Za-z0-9_-]*:/ { exit }
+    inp { print }
+  ' "$1"
+}
+
+rules_transform() { # $1=代理流量目标组名; stdin=原始规则行 -> stdout=重映射后的规则行
+  awk -v grp="$1" -v q="'" '
+    {
+      s=$0
+      sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
+      sub(/^- /, "", s)
+      if (substr(s,1,1)==q && substr(s,length(s),1)==q) s=substr(s,2,length(s)-2)
+      if (s == "") next
+      n=split(s, p, ",")
+      last=p[n]; gsub(/^[ \t]+|[ \t]+$/, "", last)
+      tail=""
+      if (tolower(last)=="no-resolve") { tgt=p[n-1]; tail=",no-resolve"; ti=n-1 } else { tgt=last; ti=n }
+      gsub(/^[ \t]+|[ \t]+$/, "", tgt)
+      u=toupper(tgt)
+      if (u!="DIRECT" && u!="REJECT" && u!="REJECT-DROP" && u!="COMPATIBLE" && u!="PASS" && u!="GLOBAL") tgt=grp
+      out=""
+      for (i=1;i<ti;i++) out=out p[i] ","
+      out=out tgt tail
+      print "  - " q out q
+    }
+  '
+}
+
+do_rules() {
+  banner "模式: 补充分流规则 (rules)"
+  ensure_root
+  [[ ${RESET:-} == y ]] || load_env_file "$(xrel_dir)/rules.env"
+  if [[ -z ${RULESFILE:-} && -t 0 ]]; then
+    printf '  规则来源文件(路径或URL, 直接回车使用内置规则集): '
+    read -r RULESFILE || RULESFILE=""
+  fi
+  GROUP=${GROUP:-🌍选择代理节点}
+  AGS_DIR=${AGS_DIR:-$HOME/agsbx}
+  local tmpd; tmpd=$(mktemp -d)
+  if dry && [[ -d $AGS_DIR ]]; then
+    rm -rf "$DRYDIR/agsbx-sim"
+    cp -a "$AGS_DIR" "$DRYDIR/agsbx-sim"
+    AGS_DIR="$DRYDIR/agsbx-sim"
+    info "DRYRUN: 订阅文件操作在副本上进行: $AGS_DIR"
+  fi
+  local target="$AGS_DIR/clmi.yaml"
+  [[ -f $target ]] || die "未找到 $target (先部署 argosbx 并开启订阅, 或用 AGS_DIR= 指定)"
+  local src="" src_label="内置规则集"
+  if [[ -n ${RULESFILE:-} ]]; then
+    src="$tmpd/src.yaml"; src_label="$RULESFILE"
+    case $RULESFILE in
+      http://*|https://*|file://*) mirror_fetch "$RULESFILE" > "$src" || true ;;
+      *) if [[ -f $RULESFILE ]]; then cp "$RULESFILE" "$src"; else die "规则文件不存在: $RULESFILE"; fi ;;
+    esac
+    [[ -s $src ]] || die "无法读取规则来源: $RULESFILE"
+    sed -i 's/\r$//' "$src" 2>/dev/null || true
+    rules_extract_key "$src" rules > "$tmpd/rules.raw0"
+    tail -n +2 "$tmpd/rules.raw0" > "$tmpd/rules.raw"
+  else
+    info "使用内置规则集"
+    rules_builtin > "$tmpd/rules.raw"
+  fi
+  local n; n=$(grep -c . "$tmpd/rules.raw" || true)
+  ((n)) || die "规则来源里没有找到 rules 内容"
+  rules_transform "$GROUP" < "$tmpd/rules.raw" > "$tmpd/rules.new"
+  local n2; n2=$(grep -c . "$tmpd/rules.new" || true)
+  ((n2)) || die "规则转换结果为空, 请检查规则文件格式"
+  [[ -f $target.xrelay-orig ]] || cp -a "$target" "$target.xrelay-orig"
+  if [[ ! -f $target.rules-orig ]]; then
+    rules_extract_key "$target" rules > "$target.rules-orig"
+  fi
+  # 清理上一次插入的 rule-providers / sub-rules 块
+  if grep -q 'xrelay-ruleproviders' "$target"; then
+    local ctmp; ctmp=$(mktemp)
+    sed -e '/# >>> xrelay-ruleproviders >>>/,/# <<< xrelay-ruleproviders <<</d' "$target" > "$ctmp" && cat "$ctmp" > "$target"
+    rm -f "$ctmp"
+  fi
+  {
+    awk '/^rules:/{exit} {print}' "$target"
+    local prov="" subr=""
+    if [[ -n $src ]]; then
+      prov=$(rules_extract_key "$src" rule-providers)
+      subr=$(rules_extract_key "$src" sub-rules)
+    fi
+    if [[ -n $prov ]]; then
+      printf '# >>> xrelay-ruleproviders >>>\n'
+      printf '%s\n' "$prov"
+      printf '# <<< xrelay-ruleproviders <<<\n'
+    fi
+    if [[ -n $subr ]]; then
+      printf '# >>> xrelay-ruleproviders >>>\n'
+      printf '%s\n' "$subr"
+      printf '# <<< xrelay-ruleproviders <<<\n'
+    fi
+    printf 'rules:\n'
+    printf "  - 'GEOIP,LAN,DIRECT'\n"
+    printf "  - 'GEOSITE,CN,DIRECT'\n"
+    printf '  # >>> xrelay-rules >>>\n'
+    cat "$tmpd/rules.new"
+    printf '  # <<< xrelay-rules <<<\n'
+  } > "$tmpd/newclmi"
+  cat "$tmpd/newclmi" > "$target"
+  local cnt_proxy cnt_direct cnt_reject
+  cnt_proxy=$(grep -cF ",$GROUP'" "$tmpd/rules.new" || true)
+  cnt_direct=$(grep -cF ",DIRECT'" "$tmpd/rules.new" || true)
+  cnt_reject=$(grep -cF ",REJECT'" "$tmpd/rules.new" || true)
+  cnt_reject=$((cnt_reject + $(grep -cF ",REJECT-DROP'" "$tmpd/rules.new" || true)))
+  ok "已应用 $n2 条规则($src_label)到 $target"
+  log "  走代理组($GROUP): $cnt_proxy 条   直连: $cnt_direct 条   拒绝: $cnt_reject 条"
+  [[ -n $prov ]] && log "  已附带 rule-providers 规则集"
+  info "客户端重新拉取订阅即可生效"
+  save_env_file "$(xrel_dir)/rules.env" \
+    "$(kv DATE "$(date '+%F %T')")" \
+    "$(kv RULESFILE "$RULESFILE")" "$(kv GROUP "$GROUP")" "$(kv AGS_DIR "$AGS_DIR")"
+  rm -rf "$tmpd"
+  ok "原始规则已备份到 $target.rules-orig, 卸载时会自动恢复"
+}
+
+do_menu_rules() {
+  log " 用内置或外部订阅的规则段, 补充/替换本机订阅的分流规则:"
+  askv GROUP "规则里代理流量的目标组名(需是本机订阅已有的组)" "🌍选择代理节点"
+  do_rules
+}
+
 # ------------------------------- 信息 / 卸载 --------------------------------
 do_info() {
   banner "已部署信息"
@@ -1345,7 +2014,18 @@ do_info() {
     )
     log ""
   fi
-  ((found)) || info "未发现本脚本的部署记录 (landing / relay / realm / mirror)"
+  if [[ -f "$d/rules.env" ]]; then
+    found=1
+    log "${C_BOLD}---- rules (补充规则) ----${C_RESET}"
+    (
+      unset DATE RULESFILE GROUP AGS_DIR
+      load_env_file "$d/rules.env"
+      log "  规则来源 : ${RULESFILE:-?}"
+      log "  代理组   : ${GROUP:-🌍选择代理节点}"
+    )
+    log ""
+  fi
+  ((found)) || info "未发现本脚本的部署记录 (landing / relay / realm / mirror / rules)"
   if ! dry; then
     local s st
     if have_bin systemctl; then
@@ -1410,10 +2090,11 @@ do_uninstall() {
   else
     printf '  [DRYRUN] 停止服务 / 移除配置\n'
   fi
-  if ! dry && [[ -f "$(xrel_dir)/mirror.env" ]]; then
+  if ! dry; then
     (
       unset AGS_DIR PREFIX
-      load_env_file "$(xrel_dir)/mirror.env"
+      [[ -f "$(xrel_dir)/mirror.env" ]] && load_env_file "$(xrel_dir)/mirror.env"
+      [[ -f "$(xrel_dir)/rules.env" ]] && load_env_file "$(xrel_dir)/rules.env"
       mirror_clean_subfiles "${AGS_DIR:-$HOME/agsbx}" "${PREFIX:-中转-}" "$(xrel_dir)"
     ) || true
   fi
@@ -1440,6 +2121,7 @@ xrelay.sh  中转机 + 落地机 一键部署脚本
   relay      在中转机部署: 单端口提供 "中转节点(走落地)" + "直连节点(本机出口)"
   realm      在中转机部署纯 TCP 转发(替代方案, 兼容任意 TCP 协议落地)
   mirror     跟随落地机订阅, 把落地节点批量镜像到本机并更新本机订阅
+  rules      用内置或外部订阅的规则段, 补充/替换本机订阅的分流规则
   info       查看已部署信息和节点链接
   uninstall  卸载本脚本部署的内容 (FORCE=y 免确认, PURGE=y 连内核一起删)
   menu       交互菜单 (默认模式)
@@ -1483,11 +2165,17 @@ mirror 模式参数 (落地机用 argosbx 部署并开了订阅时使用):
   AGS_DIR=/root/agsbx   argosbx 目录(默认自动检测)
   PYTHON=python3    指定 python 解释器(更新 sbox.json 用, 可选)
 
+rules 模式参数 (用其他订阅的规则段强化本机订阅):
+  RULESFILE=...     规则来源, 支持本机路径或 URL; 不填则使用脚本内置的增强规则集
+  GROUP=🌍选择代理节点  规则里原本指向机场代理组的流量, 改指向本机订阅里的这个组
+  AGS_DIR=/root/agsbx   argosbx 目录(默认自动检测)
+
 示例:
   落地机:  bash xrelay.sh landing LPORT=443 LSNI=aws.amazon.com NAME=落地
   中转机:  bash xrelay.sh relay LADDR=1.2.3.4 LPORT=443 LUUID=xx LSNI=xx LPBK=xx LSID=xx
   中转机:  bash xrelay.sh realm LADDR=1.2.3.4 LPORT=443 RPORT=8443
   中转机:  bash xrelay.sh mirror SUBURL=http://1.2.3.4:35948/123
+  中转机:  bash xrelay.sh rules     (零参数使用内置规则集; 也可 RULESFILE=路径或URL)
 
 说明:
   - relay 模式: 客户端用同一个 地址:端口, 靠两个不同 UUID 区分节点;
@@ -1504,19 +2192,21 @@ do_menu() {
   log " 2) 部署【中转机】  (Xray 链式, 单端口双节点, 推荐)"
   log " 3) 部署【中转机】  (realm 纯转发, 备用方案)"
   log " 4) 跟随落地订阅镜像  (argosbx 双机用户推荐, 批量中转)"
-  log " 5) 查看已部署信息 / 节点链接"
-  log " 6) 卸载"
+  log " 5) 补充分流规则  (用机场等现成配置的 rules 段强化订阅)"
+  log " 6) 查看已部署信息 / 节点链接"
+  log " 7) 卸载"
   log " 0) 退出"
   log ""
-  printf ' 请选择 [0-6]: '
+  printf ' 请选择 [0-7]: '
   local c; read -r c || c=""
   case $c in
     1) do_landing ;;
     2) do_menu_relay ;;
     3) do_menu_realm ;;
     4) do_menu_mirror ;;
-    5) do_info ;;
-    6) do_uninstall ;;
+    5) do_menu_rules ;;
+    6) do_info ;;
+    7) do_uninstall ;;
     0|"") log "再见" ;;
     *) warn "无效选择"; do_menu ;;
   esac
@@ -1564,11 +2254,12 @@ main() {
     relay)     self_install; do_relay ;;
     realm)     self_install; do_realm ;;
     mirror)    self_install; do_mirror ;;
+    rules)     self_install; do_rules ;;
     info)      self_install; do_info ;;
     uninstall) self_install; do_uninstall ;;
     help)      do_help ;;
     menu)      self_install; do_menu ;;
-    *) die "未知命令: $MODE  (可用: landing / relay / realm / mirror / info / uninstall / help / menu)" ;;
+    *) die "未知命令: $MODE  (可用: landing / relay / realm / mirror / rules / info / uninstall / help / menu)" ;;
   esac
 }
 

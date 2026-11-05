@@ -88,6 +88,7 @@ bash xrelay.sh landing|relay|realm|info|uninstall|help|menu
 | `NAME` / `DNAME` | relay | 中转节点名 / 直连节点名 |
 | `UDP=y` | realm | 同时转发 UDP（默认 n） |
 | `SUBURL` / `BASE` / `UDP` / `PREFIX` | mirror | 落地订阅地址 / 端口起始值 / 是否镜像UDP节点 / 名称前缀 |
+| `RULESFILE` / `GROUP` | rules | 规则来源(可选, 不填用内置规则集) / 代理流量改指向的组名 |
 | `FORCE=y` / `PURGE=y` | uninstall | 免确认 / 连 xray、realm 可执行文件一起删除 |
 
 `LPBK` 就是落地节点分享链接里的 `pbk=`，`LSID` 就是 `sid=`，`LSNI` 就是 `sni=`，
@@ -135,7 +136,26 @@ bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh)
 
 ---
 
-## 六、常见问题
+## 六、rules 模式：补充分流规则（用机场规则强化订阅）
+
+argosbx 生成的 Clash 规则只有 4 条基础规则。如果你有现成的订阅或机场配置文件
+（Clash 格式 yaml），可以用它的 rules 段替换中转机订阅里的规则，获得完整的分流体验。
+
+```bash
+bash <(curl -Ls <脚本地址>) rules
+```
+
+- 直接运行就使用脚本内置的增强规则集（515 条，来源为糖果云订阅的规则段）
+- 想换成其他订阅或机场的规则：加 `RULESFILE=本机路径或URL`，规则段会整体移植
+- 规则里原本指向机场策略组的流量，自动改指向你订阅里的 `GROUP` 组（默认 🌍选择代理节点）；
+  `DIRECT` / `REJECT` 原样保留，`no-resolve` 等后缀不受影响
+- 源文件里如有 `rule-providers` / `sub-rules` 段落会一并移植
+- 原始规则备份为 `clmi.yaml.rules-orig`，`xrelay uninstall` 时自动恢复；重跑本模式可反复刷新
+- 只处理 Clash 订阅 `clmi.yaml`；建议先在中转机 `mirror` 模式更新完节点后再执行
+
+---
+
+## 七、常见问题
 
 **Q: 端口被占用 / 连不上？**
 脚本会自动放行 ufw/firewalld。还需确认 VPS 商家控制台的安全组放行了对应 TCP 端口。
@@ -171,13 +191,14 @@ Xray 官方安装脚本，只能用在 systemd 系统上，Alpine 上请用 real
 
 ---
 
-## 七、部署后在机器上生成的文件
+## 八、部署后在机器上生成的文件
 
 | 路径 | 说明 |
 | --- | --- |
 | `/usr/local/etc/xray/config.json` | Xray 配置（官方标准路径） |
 | `/etc/xrelay/landing.env` 等 | 本脚本保存的参数（600 权限） |
 | `/etc/xrelay/mirror.ports` | mirror 模式的端口映射（重跑保持稳定） |
+| `clmi.yaml.rules-orig` | rules 模式保存的原始规则（卸载时恢复） |
 | `/root/xrelay-nodes.txt` | 中转机生成的节点链接备份 |
 | `/etc/realm/config.toml` | realm 模式配置 |
 | `/etc/systemd/system/realm.service` | realm 服务 |
