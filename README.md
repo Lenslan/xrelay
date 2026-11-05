@@ -36,7 +36,7 @@ VLESS-Vision-Reality（比如想换 Hysteria2、Trojan 等），用 realm 模式
 ### 第 1 步：在【落地机】上执行
 
 ```bash
-bash <(curl -Ls <脚本地址>) landing LPORT=443 LSNI=aws.amazon.com NAME=落地
+bash <(curl -Ls https://github.com/Lenslan/xrelay) landing LPORT=443 LSNI=aws.amazon.com NAME=luodi
 ```
 
 - `LPORT` 监听端口，默认 443（Reality 建议就用 443，v26 核心对非 443 端口会提示风险）
@@ -50,7 +50,7 @@ bash <(curl -Ls <脚本地址>) landing LPORT=443 LSNI=aws.amazon.com NAME=落�
 ### 第 2 步：把输出里的命令拿到【中转机】执行
 
 ```bash
-bash <(curl -Ls <脚本地址>) relay \
+bash <(curl -Ls https://github.com/Lenslan/xrelay) relay \
   LADDR=落地机IP LPORT=443 LUUID=落地UUID LSNI=落地SNI LPBK=落地pbk LSID=落地sid \
   NAME=中转
 ```
