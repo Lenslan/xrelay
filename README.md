@@ -142,7 +142,7 @@ argosbx 生成的 Clash 规则只有 4 条基础规则。如果你有现成的�
 （Clash 格式 yaml），可以用它的 rules 段替换中转机订阅里的规则，获得完整的分流体验。
 
 ```bash
-bash <(curl -Ls <脚本地址>) rules
+bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh) rules
 ```
 
 - 直接运行就使用脚本内置的增强规则集（515 条，来源为糖果云订阅的规则段）
