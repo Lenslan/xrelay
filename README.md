@@ -159,7 +159,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh)
   原因见下方常见问题「国内网站 / 企业微信图片很慢」
 - **私有组网直连（如 Tailscale）**：订阅里直接带上组网规则，客户端不用再做本地修改：
   ```bash
-  bash https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh rules PRIVDOMAIN=alpine PRIVDNS=100.100.100.100 PRIVCIDR=100.64.0.0/10
+  bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh) rules PRIVDOMAIN=alpine PRIVDNS=100.100.100.100 PRIVCIDR=100.64.0.0/10
   ```
   - `PRIVDOMAIN`：组网内的自定义域名后缀，生成置顶的 `DOMAIN-SUFFIX,alpine,DIRECT`
   - `PRIVDNS`：解析这些域名的 DNS，写入 `nameserver-policy`（`"+.alpine"` 同时匹配 `alpine` 本身和所有子域）。
