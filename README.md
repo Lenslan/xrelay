@@ -125,6 +125,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh)
 - 镜像转发端口从 `BASE`（默认 42000）向后自动分配，重跑端口保持不变；
   记得在 VPS 安全组放行对应的 TCP（及 UDP）端口范围
 - **落地机重跑 argosbx 之后，在中转机重跑一次 mirror 即可刷新订阅**
+- 更换落地机：把 `SUBURL` 换成新落地机的订阅地址重跑即可，旧的镜像节点与转发会自动清理，
+  新节点优先复用原来的端口号，一般不需要再改防火墙
 - 说明：sbox.json 的更新需要机器上有 python3；订阅文件首次修改前会自动备份为
   `*.xrelay-orig`；`xrelay uninstall` 会把镜像节点从订阅里自动移除
 - 系统兼容：Alpine / OpenRC 系统同样可用，realm 会以 OpenRC 服务托管并设置开机自启；

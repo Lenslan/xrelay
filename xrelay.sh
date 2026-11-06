@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  xrelay.sh  v1.3.0  (2026-11-05)
+#  xrelay.sh  v1.3.1  (2026-11-05)
 #
 #  中转机 + 落地机 一键部署脚本  (Xray VLESS-Vision-Reality)
 #
@@ -24,7 +24,7 @@ set -u
 
 [[ ${BASH_VERSINFO[0]:-0} -ge 4 ]] || { echo "需要 bash 4.0 及以上版本"; exit 1; }
 
-VERSION="1.3.0"
+VERSION="1.3.1"
 DEFAULT_SNI="aws.amazon.com"
 
 C_RESET=$'\033[0m'
@@ -1127,6 +1127,11 @@ do_mirror() {
   [[ ${RESET:-} == y ]] || load_env_file "$(xrel_dir)/mirror.env"
   askv SUBURL "落地机订阅地址(粘贴 clmi.yaml / jhsub.txt / sbox.json 任意一条)" ""
   [[ -n ${SUBURL:-} ]] || die "缺少落地机订阅地址 SUBURL"
+  local prev_sub
+  prev_sub=$(sed -n "s/^SUBURL='\(.*\)'$/\1/p" "$(xrel_dir)/mirror.env" 2>/dev/null | head -n1)
+  if [[ -n $prev_sub && $prev_sub != "$SUBURL" ]]; then
+    info "检测到更换落地订阅(原: $prev_sub), 将按新落地重新分配镜像"
+  fi
   local subbase=${SUBURL%/}
   case $subbase in
     */clmi.yaml|*/sbox.json|*/jhsub.txt) subbase=${subbase%/*} ;;
@@ -1158,7 +1163,7 @@ do_mirror() {
   mirror_fetch "$subbase/sbox.json" > "$tmpd/land_sbox.json" || true
 
   # ---- 分配端口并生成镜像条目 ----
-  local -a MKEYS=() MPORTS=() MIRROR_ROWS=()
+  local -a MKEYS=() MPORTS=() MIRROR_ROWS=() PROXY_BLOCKS=() PROXY_KEYS=() PROXY_NAMES=() LINK_KEYS=() LINK_LINES=()
   local -A TOUCHED=() USED_N=()
   mirror_load_ports "$(xrel_dir)/mirror.ports"
   [[ -f "$AGS_DIR/clmi.yaml" ]] && mirror_clean_clmi "$AGS_DIR/clmi.yaml"
@@ -1168,8 +1173,8 @@ do_mirror() {
   local proxies_out="$tmpd/proxies.block" names_out="$tmpd/names.block"
   : > "$proxies_out"; : > "$names_out"
 
-  process_block() {
-    local blk=$1 nm srv prt key np name2 base i
+  collect_block() { # 收集阶段: 过滤并保存条目, 暂不分配端口
+    local blk=$1 nm srv prt key
     nm=$(trim "$(blk_field "$blk" name)")
     if [[ $nm == '"'*'"' ]]; then nm=${nm:1:${#nm}-2}; fi
     nm=$(trim "$nm")
@@ -1188,36 +1193,25 @@ do_mirror() {
       return 0
     fi
     key="$(printf '%s' "$srv" | tr 'A-Z' 'a-z'):$prt"
-    mirror_alloc "$key"; np=$MIRROR_PORT
-    name2="${PREFIX}${nm}"
-    base=$name2; i=2
-    while [[ -n ${USED_N[$name2]:-} ]]; do name2="$base-$i"; i=$((i+1)); done
-    USED_N["$name2"]=1
-    mirror_transform_block "$blk" "$name2" "$ADDR" "$np" >> "$proxies_out"
-    printf '\n' >> "$proxies_out"
-    printf '    - "%s"\n' "$name2" >> "$names_out"
-    MIRROR_ROWS+=("$name2|$np|$key")
+    PROXY_BLOCKS+=("$blk"); PROXY_KEYS+=("$key"); PROXY_NAMES+=("$nm")
     return 0
   }
 
   local blk="" line
   while IFS= read -r line; do
     if [[ $line == '@@XRL_BLK@@' ]]; then
-      [[ -n $blk ]] && process_block "$blk"
+      [[ -n $blk ]] && collect_block "$blk"
       blk=""
     else
       blk+="$line"$'\n'
     fi
   done < <(clmi_split_blocks "$tmpd/land_clmi.yaml")
-  local n=${#MIRROR_ROWS[@]}
-  ((n)) || die "没有解析到任何可镜像的节点(可检查 INCLUDE 过滤条件)"
 
-  # ---- jhsub 链接镜像(与 clmi 共用端口映射) ----
   local links_new="$tmpd/links.new"; : > "$links_new"
   local jh_fetched=0
   if [[ -s "$tmpd/land_jhsub.txt" ]]; then
     jh_fetched=1
-    local lk lname lkey lnp
+    local lk lname lkey
     while IFS= read -r lk; do
       lk=$(trim "$lk")
       [[ -n $lk ]] || continue
@@ -1230,10 +1224,42 @@ do_mirror() {
         if printf '%s' "$lk" | grep -q 'alpn=h3'; then warn "UDP=n, 跳过 QUIC(h3) 节点链接: ${lname:-link}"; continue; fi
       fi
       lkey=$(mirror_link_key "$lk") || { warn "无法解析链接(缺服务器地址或格式不支持), 跳过: ${lk:0:70}"; continue; }
-      mirror_alloc "$lkey"; lnp=$MIRROR_PORT
-      { mirror_link_rewrite "$lk" "$ADDR" "$lnp"; printf '\n'; } >> "$links_new"
+      LINK_KEYS+=("$lkey"); LINK_LINES+=("$lk")
     done < "$tmpd/land_jhsub.txt"
   fi
+
+  # ---- 回收废弃端口: 端口映射只保留新落地订阅里仍然存在的 key ----
+  local -A NEWSET=()
+  local k
+  if ((${#PROXY_KEYS[@]})); then for k in "${PROXY_KEYS[@]}"; do NEWSET["$k"]=1; done; fi
+  if ((${#LINK_KEYS[@]})); then for k in "${LINK_KEYS[@]}"; do NEWSET["$k"]=1; done; fi
+  local i out_k=() out_p=()
+  for ((i=0; i<${#MKEYS[@]}; i++)); do
+    [[ -n ${NEWSET[${MKEYS[i]}]:-} ]] || continue
+    out_k+=("${MKEYS[i]}"); out_p+=("${MPORTS[i]}")
+  done
+  if ((${#out_k[@]})); then MKEYS=("${out_k[@]}"); MPORTS=("${out_p[@]}"); else MKEYS=(); MPORTS=(); fi
+
+  # ---- 生成阶段: 统一分配端口并输出镜像条目 ----
+  local np name2 base j
+  for ((i=0; i<${#PROXY_BLOCKS[@]}; i++)); do
+    k=${PROXY_KEYS[i]}
+    mirror_alloc "$k"; np=$MIRROR_PORT
+    name2="${PREFIX}${PROXY_NAMES[i]}"
+    base=$name2; j=2
+    while [[ -n ${USED_N[$name2]:-} ]]; do name2="$base-$j"; j=$((j+1)); done
+    USED_N["$name2"]=1
+    mirror_transform_block "${PROXY_BLOCKS[i]}" "$name2" "$ADDR" "$np" >> "$proxies_out"
+    printf '\n' >> "$proxies_out"
+    printf '    - "%s"\n' "$name2" >> "$names_out"
+    MIRROR_ROWS+=("$name2|$np|$k")
+  done
+  local n=${#MIRROR_ROWS[@]}
+  ((n)) || die "没有解析到任何可镜像的节点(可检查 INCLUDE 过滤条件)"
+  for ((i=0; i<${#LINK_LINES[@]}; i++)); do
+    mirror_alloc "${LINK_KEYS[i]}"; np=$MIRROR_PORT
+    { mirror_link_rewrite "${LINK_LINES[i]}" "$ADDR" "$np"; printf '\n'; } >> "$links_new"
+  done
 
   # ---- 保存端口映射(仅保留本次出现过的节点) ----
   mirror_prune_ports
