@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  xrelay.sh  v1.3.1  (2026-11-05)
+#  xrelay.sh  v1.3.2  (2026-11-06)
 #
 #  中转机 + 落地机 一键部署脚本  (Xray VLESS-Vision-Reality)
 #
@@ -9,7 +9,7 @@
 #              "中转节点"(流量走落地机出口) 与 "直连节点"(流量从本机出口)
 #    realm   : 中转替代方案, 纯 TCP 转发(兼容任意 TCP 落地协议, UDP 需自测)
 #    mirror  : 跟随落地机订阅, 把落地节点批量镜像到本机并更新本机订阅(推荐)
-#    rules   : 用内置或外部订阅(如机场配置)的规则段, 补充/替换本机订阅的分流规则
+#    rules   : 用内置或外部订阅(如机场配置)的规则段补充本机订阅的分流规则, 并修正国内域名的 DNS 解析
 #    info    : 查看已部署信息      uninstall: 卸载
 #    help    : 参数与用法说明      menu: 交互菜单(默认)
 #
@@ -24,7 +24,7 @@ set -u
 
 [[ ${BASH_VERSINFO[0]:-0} -ge 4 ]] || { echo "需要 bash 4.0 及以上版本"; exit 1; }
 
-VERSION="1.3.1"
+VERSION="1.3.2"
 DEFAULT_SNI="aws.amazon.com"
 
 C_RESET=$'\033[0m'
@@ -1045,6 +1045,13 @@ PYEOF
     rm -f "$ctmp"
     ok "已清理 $d/clmi.yaml 中的 rule-providers 插入块"
   fi
+  if [[ -f "$d/clmi.yaml" ]] && grep -q '# >>> xrelay-dns >>>' "$d/clmi.yaml"; then
+    local dtmp
+    dtmp=$(mktemp)
+    sed -e '/# >>> xrelay-dns >>>/,/# <<< xrelay-dns <<</d' "$d/clmi.yaml" > "$dtmp" && cat "$dtmp" > "$d/clmi.yaml"
+    rm -f "$dtmp"
+    ok "已清理 $d/clmi.yaml 中的 DNS 修正块"
+  fi
   if [[ -f "$d/clmi.yaml.rules-orig" && -f "$d/clmi.yaml" ]]; then
     local rtmp
     rtmp=$(mktemp)
@@ -1743,7 +1750,7 @@ rules_builtin() {
     - 'DOMAIN-SUFFIX,sharethis.com,Candytally（糖果云）'
     - 'DOMAIN-SUFFIX,shazam.com,Candytally（糖果云）'
     - 'DOMAIN-SUFFIX,skype.com,Candytally（糖果云）'
-    - 'DOMAIN-SUFFIX,smartdnsCandytally（糖果云）.com,Candytally（糖果云）'
+    - 'DOMAIN-SUFFIX,smartdnsproxy.com,Candytally（糖果云）'
     - 'DOMAIN-SUFFIX,smartmailcloud.com,Candytally（糖果云）'
     - 'DOMAIN-SUFFIX,sndcdn.com,Candytally（糖果云）'
     - 'DOMAIN-SUFFIX,sony.com,Candytally（糖果云）'
@@ -1898,6 +1905,59 @@ rules_transform() { # $1=代理流量目标组名; stdin=原始规则行 -> stdo
   '
 }
 
+# 国内 DoH, 与 argosbx 自带的 proxy-server-nameserver 相同
+RULES_CN_DNS=("https://223.5.5.5/dns-query" "https://doh.pub/dns-query")
+
+rules_patch_dns() { # $1=clmi.yaml; 在 dns 段末尾插入/刷新 xrelay-dns 标记块
+  # 背景: argosbx 的 dns 只配了境外 DoH(1.1.1.1/8.8.8.8)且 respect-rules: true, DNS 查询本身走代理出海,
+  # 国内域名会被解析到落地机附近的海外 CDN 节点, 规则虽判定直连, 实际却跨境直连海外节点 -> 国内网站/图片极慢或加载失败.
+  # 修正: geosite:cn 与内网域名改用国内 DNS(nameserver-policy); 走 DIRECT 的连接一律用国内 DNS 解析(direct-nameserver)
+  local f=$1 tmp ind has_policy has_direct blk s
+  if grep -q '# >>> xrelay-dns >>>' "$f"; then
+    tmp=$(mktemp)
+    sed -e '/# >>> xrelay-dns >>>/,/# <<< xrelay-dns <<</d' "$f" > "$tmp" && cat "$tmp" > "$f"
+    rm -f "$tmp"
+  fi
+  grep -q '^dns:[[:space:]]*$' "$f" || { warn "$f 中没有(块格式的) dns 段, 跳过 DNS 修正"; return 1; }
+  # 沿用 dns 段原有缩进, 避免缩进混用导致 YAML 解析错误
+  ind=$(awk '/^dns:[[:space:]]*$/{p=1;next} p&&/^[^[:space:]#]/{exit}
+             p&&/^[[:space:]]+[^[:space:]#]/{match($0,/^[[:space:]]+/); print substr($0,1,RLENGTH); exit}' "$f")
+  [[ -n $ind ]] || ind="  "
+  has_policy=$(awk -v k="${ind}nameserver-policy:" '/^dns:/{p=1;next} p&&/^[^[:space:]#]/{exit} p&&index($0,k)==1{print "y";exit}' "$f")
+  has_direct=$(awk -v k="${ind}direct-nameserver:" '/^dns:/{p=1;next} p&&/^[^[:space:]#]/{exit} p&&index($0,k)==1{print "y";exit}' "$f")
+  [[ -n $has_policy ]] && warn "dns 段已有 nameserver-policy, 未自动添加 geosite:cn 国内解析(请自行确认国内域名用国内 DNS)"
+  [[ -n $has_direct ]] && warn "dns 段已有 direct-nameserver, 保留原设置"
+  [[ -n $has_policy && -n $has_direct ]] && return 1
+  blk=$(mktemp)
+  {
+    printf '%s# >>> xrelay-dns >>>\n' "$ind"
+    if [[ -z $has_policy ]]; then
+      printf '%snameserver-policy:\n%s%s"geosite:cn,private":\n' "$ind" "$ind" "$ind"
+      for s in "${RULES_CN_DNS[@]}"; do printf '%s%s%s- "%s"\n' "$ind" "$ind" "$ind" "$s"; done
+    fi
+    if [[ -z $has_direct ]]; then
+      printf '%sdirect-nameserver:\n' "$ind"
+      for s in "${RULES_CN_DNS[@]}"; do printf '%s%s- "%s"\n' "$ind" "$ind" "$s"; done
+    fi
+    printf '%s# <<< xrelay-dns <<<\n' "$ind"
+  } > "$blk"
+  tmp=$(mktemp)
+  awk -v blk="$blk" '
+    function dump(  l){ while ((getline l < blk) > 0) print l; close(blk) }
+    !done && /^dns:[[:space:]]*$/ { indns=1; print; next }
+    indns {
+      if ($0 ~ /^[[:space:]]*$/) { pend = pend $0 "\n"; next }   # dns 段尾部空行留到块后面
+      if ($0 ~ /^[^[:space:]#]/) { dump(); printf "%s", pend; pend=""; indns=0; done=1; print; next }
+      if (pend != "") { printf "%s", pend; pend="" }
+      print; next
+    }
+    { print }
+    END { if (indns) { dump(); printf "%s", pend } }
+  ' "$f" > "$tmp" && cat "$tmp" > "$f"
+  rm -f "$tmp" "$blk"
+  return 0
+}
+
 do_rules() {
   banner "模式: 补充分流规则 (rules)"
   ensure_root
@@ -1947,6 +2007,8 @@ do_rules() {
     sed -e '/# >>> xrelay-ruleproviders >>>/,/# <<< xrelay-ruleproviders <<</d' "$target" > "$ctmp" && cat "$ctmp" > "$target"
     rm -f "$ctmp"
   fi
+  local dnsfix=""
+  rules_patch_dns "$target" && dnsfix=y
   {
     awk '/^rules:/{exit} {print}' "$target"
     local prov="" subr=""
@@ -1965,7 +2027,9 @@ do_rules() {
       printf '# <<< xrelay-ruleproviders <<<\n'
     fi
     printf 'rules:\n'
-    printf "  - 'GEOIP,LAN,DIRECT'\n"
+    # 首条若是需要 IP 的规则(无 no-resolve), 每个域名都要先等本地 DNS 才能继续匹配, 拖慢所有新连接;
+    # 内网"域名"由规则集末尾的私有网段 IP-CIDR 兜底
+    printf "  - 'GEOIP,LAN,DIRECT,no-resolve'\n"
     printf "  - 'GEOSITE,CN,DIRECT'\n"
     printf '  # >>> xrelay-rules >>>\n'
     cat "$tmpd/rules.new"
@@ -1980,6 +2044,7 @@ do_rules() {
   ok "已应用 $n2 条规则($src_label)到 $target"
   log "  走代理组($GROUP): $cnt_proxy 条   直连: $cnt_direct 条   拒绝: $cnt_reject 条"
   [[ -n $prov ]] && log "  已附带 rule-providers 规则集"
+  [[ -n $dnsfix ]] && ok "已修正 DNS: 国内域名与直连流量改用国内 DNS 解析(${RULES_CN_DNS[*]}), 避免被解析到海外 CDN 节点"
   info "客户端重新拉取订阅即可生效"
   save_env_file "$(xrel_dir)/rules.env" \
     "$(kv DATE "$(date '+%F %T')")" \
@@ -2195,6 +2260,7 @@ rules 模式参数 (用其他订阅的规则段强化本机订阅):
   RULESFILE=...     规则来源, 支持本机路径或 URL; 不填则使用脚本内置的增强规则集
   GROUP=🌍选择代理节点  规则里原本指向机场代理组的流量, 改指向本机订阅里的这个组
   AGS_DIR=/root/agsbx   argosbx 目录(默认自动检测)
+  (同时会修正订阅的 DNS: 国内域名/直连流量改用国内 DNS 解析, 解决国内网站/图片慢或加载不出)
 
 示例:
   落地机:  bash xrelay.sh landing LPORT=443 LSNI=aws.amazon.com NAME=落地

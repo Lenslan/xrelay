@@ -152,12 +152,29 @@ bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh)
 - 规则里原本指向机场策略组的流量，自动改指向你订阅里的 `GROUP` 组（默认 🌍选择代理节点）；
   `DIRECT` / `REJECT` 原样保留，`no-resolve` 等后缀不受影响
 - 源文件里如有 `rule-providers` / `sub-rules` 段落会一并移植
-- 原始规则备份为 `clmi.yaml.rules-orig`，`xrelay uninstall` 时自动恢复；重跑本模式可反复刷新
+- **同时修正 DNS**：在 `dns` 段加入 `nameserver-policy`（`geosite:cn,private` → 国内 DoH）和
+  `direct-nameserver`（直连流量一律用国内 DoH 解析），并把首条规则改为 `GEOIP,LAN,DIRECT,no-resolve`。
+  原因见下方常见问题「国内网站 / 企业微信图片很慢」
+- 原始规则备份为 `clmi.yaml.rules-orig`，`xrelay uninstall` 时自动恢复（DNS 修正块一并清除）；重跑本模式可反复刷新
 - 只处理 Clash 订阅 `clmi.yaml`；建议先在中转机 `mirror` 模式更新完节点后再执行
 
 ---
 
 ## 七、常见问题
+
+**Q: 国内网站很慢 / 企业微信、微信表情包和图片加载不出来？**
+根因在 argosbx 生成的订阅 DNS：`nameserver` 只有境外 DoH（1.1.1.1 / 8.8.8.8）且开启了
+`respect-rules`，DNS 查询本身经代理出海，国内域名会被解析到**落地机附近的海外 CDN 节点**。
+规则虽然判定为直连，客户端却是从国内跨境直连这些海外节点，于是又慢又容易断。
+实测（落地机在美国）：`pic1.zhimg.com` 被解析到美国达拉斯、TLS 握手直接被重置；
+`wxapp.tc.qq.com`（微信表情 CDN）被解析到加拿大多伦多，首字节约 500ms，修正后约 20ms。
+解决：在中转机重跑 `bash xrelay.sh rules`，客户端更新订阅即可。
+另外检查客户端本地加的前置规则：`IP-CIDR` / `GEOIP` 类规则不带 `no-resolve` 时，每个新域名都要先
+走一次 DNS 才能继续匹配（例如 Clash Verge 规则增强里的 `IP-CIDR,100.64.0.0/10,DIRECT` 应写成
+`IP-CIDR,100.64.0.0/10,DIRECT,no-resolve`）。
+Clash Verge 用户注意：全局扩展配置（Merge）里如果也写了 `dns.nameserver-policy`，会把订阅里的整段覆盖
+（Verge 2.5.x 对 `dns` 只做一层浅合并）；`direct-nameserver` 不受影响，直连仍走国内 DNS，
+但建议把 `"geosite:cn,private": ["https://223.5.5.5/dns-query", "https://doh.pub/dns-query"]` 也写进 Merge 的那段里。
 
 **Q: 端口被占用 / 连不上？**
 脚本会自动放行 ufw/firewalld。还需确认 VPS 商家控制台的安全组放行了对应 TCP 端口。
