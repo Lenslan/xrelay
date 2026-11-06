@@ -89,6 +89,7 @@ bash xrelay.sh landing|relay|realm|info|uninstall|help|menu
 | `UDP=y` | realm | 同时转发 UDP（默认 n） |
 | `SUBURL` / `BASE` / `UDP` / `PREFIX` | mirror | 落地订阅地址 / 端口起始值 / 是否镜像UDP节点 / 名称前缀 |
 | `RULESFILE` / `GROUP` | rules | 规则来源(可选, 不填用内置规则集) / 代理流量改指向的组名 |
+| `PRIVDOMAIN` / `PRIVDNS` / `PRIVCIDR` | rules | 私有组网(如 Tailscale)直连: 自定义域名后缀 / 解析它们的 DNS / 组网网段, 均可选、逗号分隔 |
 | `FORCE=y` / `PURGE=y` | uninstall | 免确认 / 连 xray、realm 可执行文件一起删除 |
 
 `LPBK` 就是落地节点分享链接里的 `pbk=`，`LSID` 就是 `sid=`，`LSNI` 就是 `sni=`，
@@ -147,14 +148,27 @@ argosbx 生成的 Clash 规则只有 4 条基础规则。如果你有现成的�
 bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh) rules
 ```
 
-- 直接运行就使用脚本内置的增强规则集（515 条，来源为糖果云订阅的规则段）
+- 直接运行就使用脚本内置的增强规则集（514 条，来源为糖果云订阅的规则段）
 - 想换成其他订阅或机场的规则：加 `RULESFILE=本机路径或URL`，规则段会整体移植
 - 规则里原本指向机场策略组的流量，自动改指向你订阅里的 `GROUP` 组（默认 🌍选择代理节点）；
   `DIRECT` / `REJECT` 原样保留，`no-resolve` 等后缀不受影响
 - 源文件里如有 `rule-providers` / `sub-rules` 段落会一并移植
 - **同时修正 DNS**：在 `dns` 段加入 `nameserver-policy`（`geosite:cn,private` → 国内 DoH）和
-  `direct-nameserver`（直连流量一律用国内 DoH 解析），并把首条规则改为 `GEOIP,LAN,DIRECT,no-resolve`。
+  `direct-nameserver`（直连流量一律用国内 DoH 解析，且遵循 `nameserver-policy`），并把首条规则改为
+  `GEOIP,LAN,DIRECT,no-resolve`。
   原因见下方常见问题「国内网站 / 企业微信图片很慢」
+- **私有组网直连（如 Tailscale）**：订阅里直接带上组网规则，客户端不用再做本地修改：
+  ```bash
+  bash xrelay.sh rules PRIVDOMAIN=alpine PRIVDNS=100.100.100.100 PRIVCIDR=100.64.0.0/10
+  ```
+  - `PRIVDOMAIN`：组网内的自定义域名后缀，生成置顶的 `DOMAIN-SUFFIX,alpine,DIRECT`
+  - `PRIVDNS`：解析这些域名的 DNS，写入 `nameserver-policy`（`"+.alpine"` 同时匹配 `alpine` 本身和所有子域）。
+    Tailscale 推荐填 MagicDNS `100.100.100.100`：设备名和 Tailscale 后台配置的 split DNS 都能解析；
+    直接填组网里某台 DNS 设备的 IP 也可以，但注意它对裸设备名可能返回 `127.0.0.1`（其 /etc/hosts）
+  - `PRIVCIDR`：组网网段，生成置顶的 `IP-CIDR,...,DIRECT,no-resolve`；`PRIVDNS` 里的 IP 也会自动加一条直连，
+    保证 DNS 查询本身不被送进代理（订阅开了 `respect-rules`）
+  - 参数会保存，之后重跑 `rules`（例如 argosbx 重新生成订阅后）自动沿用；要清除用 `RESET=y` 重跑
+  - 前提：客户端设备本身已连上 Tailscale
 - 原始规则备份为 `clmi.yaml.rules-orig`，`xrelay uninstall` 时自动恢复（DNS 修正块一并清除）；重跑本模式可反复刷新
 - 只处理 Clash 订阅 `clmi.yaml`；建议先在中转机 `mirror` 模式更新完节点后再执行
 
@@ -170,11 +184,9 @@ bash <(curl -Ls https://raw.githubusercontent.com/Lenslan/xrelay/main/xrelay.sh)
 `wxapp.tc.qq.com`（微信表情 CDN）被解析到加拿大多伦多，首字节约 500ms，修正后约 20ms。
 解决：在中转机重跑 `bash xrelay.sh rules`，客户端更新订阅即可。
 另外检查客户端本地加的前置规则：`IP-CIDR` / `GEOIP` 类规则不带 `no-resolve` 时，每个新域名都要先
-走一次 DNS 才能继续匹配（例如 Clash Verge 规则增强里的 `IP-CIDR,100.64.0.0/10,DIRECT` 应写成
-`IP-CIDR,100.64.0.0/10,DIRECT,no-resolve`）。
+走一次 DNS 才能继续匹配。组网类规则建议直接用 rules 模式的 `PRIVDOMAIN` / `PRIVCIDR` 写进订阅，不要在本地加。
 Clash Verge 用户注意：全局扩展配置（Merge）里如果也写了 `dns.nameserver-policy`，会把订阅里的整段覆盖
-（Verge 2.5.x 对 `dns` 只做一层浅合并）；`direct-nameserver` 不受影响，直连仍走国内 DNS，
-但建议把 `"geosite:cn,private": ["https://223.5.5.5/dns-query", "https://doh.pub/dns-query"]` 也写进 Merge 的那段里。
+（Verge 2.5.x 对 `dns` 只做一层浅合并），国内域名与组网域名的解析策略都会丢失，请删掉 Merge 里的这一段。
 
 **Q: 端口被占用 / 连不上？**
 脚本会自动放行 ufw/firewalld。还需确认 VPS 商家控制台的安全组放行了对应 TCP 端口。

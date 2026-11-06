@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  xrelay.sh  v1.3.2  (2026-11-06)
+#  xrelay.sh  v1.4.0  (2026-11-06)
 #
 #  中转机 + 落地机 一键部署脚本  (Xray VLESS-Vision-Reality)
 #
@@ -9,7 +9,8 @@
 #              "中转节点"(流量走落地机出口) 与 "直连节点"(流量从本机出口)
 #    realm   : 中转替代方案, 纯 TCP 转发(兼容任意 TCP 落地协议, UDP 需自测)
 #    mirror  : 跟随落地机订阅, 把落地节点批量镜像到本机并更新本机订阅(推荐)
-#    rules   : 用内置或外部订阅(如机场配置)的规则段补充本机订阅的分流规则, 并修正国内域名的 DNS 解析
+#    rules   : 用内置或外部订阅(如机场配置)的规则段补充本机订阅的分流规则, 修正国内域名的 DNS 解析,
+#              可选加入私有组网(如 Tailscale)直连
 #    info    : 查看已部署信息      uninstall: 卸载
 #    help    : 参数与用法说明      menu: 交互菜单(默认)
 #
@@ -24,7 +25,7 @@ set -u
 
 [[ ${BASH_VERSINFO[0]:-0} -ge 4 ]] || { echo "需要 bash 4.0 及以上版本"; exit 1; }
 
-VERSION="1.3.2"
+VERSION="1.4.0"
 DEFAULT_SNI="aws.amazon.com"
 
 C_RESET=$'\033[0m'
@@ -1375,7 +1376,6 @@ rules_builtin() {
     - 'DOMAIN-SUFFIX,apps.apple.com,Candytally（糖果云）'
     - 'DOMAIN-SUFFIX,blobstore.apple.com,Candytally（糖果云）'
     - 'DOMAIN,cvws.icloud-content.com,Candytally（糖果云）'
-    - 'DOMAIN-SUFFIX,alpine,DIRECT'
     - 'DOMAIN-SUFFIX,mzstatic.com,DIRECT'
     - 'DOMAIN-SUFFIX,itunes.apple.com,DIRECT'
     - 'DOMAIN-SUFFIX,icloud.com,DIRECT'
@@ -1908,11 +1908,46 @@ rules_transform() { # $1=代理流量目标组名; stdin=原始规则行 -> stdo
 # 国内 DoH, 与 argosbx 自带的 proxy-server-nameserver 相同
 RULES_CN_DNS=("https://223.5.5.5/dns-query" "https://doh.pub/dns-query")
 
+# ---- 私有组网(如 Tailscale): PRIVDOMAIN 域名后缀 / PRIVDNS 解析它们的 DNS / PRIVCIDR 组网网段 ----
+rules_csv() { # $1=逗号分隔列表 -> 每行一项(去首尾空白)
+  local -a arr; local x
+  IFS=, read -ra arr <<< "$1"
+  for x in "${arr[@]}"; do x=$(trim "$x"); [[ -n $x ]] && printf '%s\n' "$x"; done
+  return 0
+}
+rules_dns_ip() { # DNS 地址(如 1.2.3.4 / udp://1.2.3.4:53 / tls://1.2.3.4) -> 其中的 IPv4, 不是则返回1
+  local s=$1; s=${s#*://}; s=${s%%/*}; s=${s%:*}
+  [[ $s =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && printf '%s' "$s"
+}
+rules_priv_check() { # 校验私有组网参数, 不合法直接退出
+  local x re_dom='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' re_v4='^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' \
+        re_v6='^[0-9A-Fa-f:]+/[0-9]{1,3}$' re_dns='^[A-Za-z0-9.:/_%@#-]+$'
+  while IFS= read -r x; do x=${x#+.}; x=${x#.}; [[ $x =~ $re_dom ]] || die "PRIVDOMAIN 格式无效: $x"; done < <(rules_csv "${PRIVDOMAIN:-}")
+  while IFS= read -r x; do [[ $x =~ $re_v4 || $x =~ $re_v6 ]] || die "PRIVCIDR 格式无效: $x (示例 100.64.0.0/10)"; done < <(rules_csv "${PRIVCIDR:-}")
+  while IFS= read -r x; do [[ $x =~ $re_dns ]] || die "PRIVDNS 格式无效: $x"; done < <(rules_csv "${PRIVDNS:-}")
+  [[ -n ${PRIVDNS:-} && -z ${PRIVDOMAIN:-} ]] && die "PRIVDNS 需要和 PRIVDOMAIN 一起使用"
+  return 0
+}
+rules_priv_rules() { # 私有组网直连规则, 放在规则最前(IP 类全部 no-resolve)
+  local x ip
+  while IFS= read -r x; do x=${x#+.}; x=${x#.}; printf "  - 'DOMAIN-SUFFIX,%s,DIRECT'\n" "$x"; done < <(rules_csv "${PRIVDOMAIN:-}")
+  while IFS= read -r x; do
+    if [[ $x == *:* ]]; then printf "  - 'IP-CIDR6,%s,DIRECT,no-resolve'\n" "$x"
+    else printf "  - 'IP-CIDR,%s,DIRECT,no-resolve'\n" "$x"; fi
+  done < <(rules_csv "${PRIVCIDR:-}")
+  # 订阅开了 respect-rules, DNS 查询本身也按规则走; 私有 DNS 必须直连, 否则会被送进代理
+  while IFS= read -r x; do
+    if ip=$(rules_dns_ip "$x"); then printf "  - 'IP-CIDR,%s/32,DIRECT,no-resolve'\n" "$ip"; fi
+  done < <(rules_csv "${PRIVDNS:-}")
+  return 0
+}
+
 rules_patch_dns() { # $1=clmi.yaml; 在 dns 段末尾插入/刷新 xrelay-dns 标记块
   # 背景: argosbx 的 dns 只配了境外 DoH(1.1.1.1/8.8.8.8)且 respect-rules: true, DNS 查询本身走代理出海,
   # 国内域名会被解析到落地机附近的海外 CDN 节点, 规则虽判定直连, 实际却跨境直连海外节点 -> 国内网站/图片极慢或加载失败.
-  # 修正: geosite:cn 与内网域名改用国内 DNS(nameserver-policy); 走 DIRECT 的连接一律用国内 DNS 解析(direct-nameserver)
-  local f=$1 tmp ind has_policy has_direct blk s
+  # 修正: geosite:cn 与内网域名改用国内 DNS(nameserver-policy); 走 DIRECT 的连接一律用国内 DNS 解析(direct-nameserver),
+  # 且直连解析也遵循 nameserver-policy(follow-policy), 否则私有组网域名(PRIVDOMAIN)直连时会被拿去问国内 DNS 而失败
+  local f=$1 tmp ind has_policy has_direct has_follow blk s d
   if grep -q '# >>> xrelay-dns >>>' "$f"; then
     tmp=$(mktemp)
     sed -e '/# >>> xrelay-dns >>>/,/# <<< xrelay-dns <<</d' "$f" > "$tmp" && cat "$tmp" > "$f"
@@ -1925,19 +1960,30 @@ rules_patch_dns() { # $1=clmi.yaml; 在 dns 段末尾插入/刷新 xrelay-dns �
   [[ -n $ind ]] || ind="  "
   has_policy=$(awk -v k="${ind}nameserver-policy:" '/^dns:/{p=1;next} p&&/^[^[:space:]#]/{exit} p&&index($0,k)==1{print "y";exit}' "$f")
   has_direct=$(awk -v k="${ind}direct-nameserver:" '/^dns:/{p=1;next} p&&/^[^[:space:]#]/{exit} p&&index($0,k)==1{print "y";exit}' "$f")
+  has_follow=$(awk -v k="${ind}direct-nameserver-follow-policy:" '/^dns:/{p=1;next} p&&/^[^[:space:]#]/{exit} p&&index($0,k)==1{print "y";exit}' "$f")
   [[ -n $has_policy ]] && warn "dns 段已有 nameserver-policy, 未自动添加 geosite:cn 国内解析(请自行确认国内域名用国内 DNS)"
+  [[ -n $has_policy && -n ${PRIVDNS:-} ]] && warn "因此也无法添加私有组网域名的解析(PRIVDNS), 请手动写入该 nameserver-policy"
   [[ -n $has_direct ]] && warn "dns 段已有 direct-nameserver, 保留原设置"
   [[ -n $has_policy && -n $has_direct ]] && return 1
   blk=$(mktemp)
   {
     printf '%s# >>> xrelay-dns >>>\n' "$ind"
     if [[ -z $has_policy ]]; then
-      printf '%snameserver-policy:\n%s%s"geosite:cn,private":\n' "$ind" "$ind" "$ind"
+      printf '%snameserver-policy:\n' "$ind"
+      if [[ -n ${PRIVDNS:-} ]]; then   # 私有组网域名放在最前(先匹配先生效); "+.x" 同时匹配 x 本身及其子域
+        while IFS= read -r d; do
+          d=${d#+.}; d=${d#.}
+          printf '%s%s"+.%s":\n' "$ind" "$ind" "$d"
+          while IFS= read -r s; do printf '%s%s%s- "%s"\n' "$ind" "$ind" "$ind" "$s"; done < <(rules_csv "$PRIVDNS")
+        done < <(rules_csv "${PRIVDOMAIN:-}")
+      fi
+      printf '%s%s"geosite:cn,private":\n' "$ind" "$ind"
       for s in "${RULES_CN_DNS[@]}"; do printf '%s%s%s- "%s"\n' "$ind" "$ind" "$ind" "$s"; done
     fi
     if [[ -z $has_direct ]]; then
       printf '%sdirect-nameserver:\n' "$ind"
       for s in "${RULES_CN_DNS[@]}"; do printf '%s%s- "%s"\n' "$ind" "$ind" "$s"; done
+      [[ -z $has_follow ]] && printf '%sdirect-nameserver-follow-policy: true\n' "$ind"
     fi
     printf '%s# <<< xrelay-dns <<<\n' "$ind"
   } > "$blk"
@@ -1968,6 +2014,7 @@ do_rules() {
   fi
   GROUP=${GROUP:-🌍选择代理节点}
   AGS_DIR=${AGS_DIR:-$HOME/agsbx}
+  rules_priv_check
   local tmpd; tmpd=$(mktemp -d)
   if dry && [[ -d $AGS_DIR ]]; then
     rm -rf "$DRYDIR/agsbx-sim"
@@ -2030,6 +2077,7 @@ do_rules() {
     # 首条若是需要 IP 的规则(无 no-resolve), 每个域名都要先等本地 DNS 才能继续匹配, 拖慢所有新连接;
     # 内网"域名"由规则集末尾的私有网段 IP-CIDR 兜底
     printf "  - 'GEOIP,LAN,DIRECT,no-resolve'\n"
+    rules_priv_rules
     printf "  - 'GEOSITE,CN,DIRECT'\n"
     printf '  # >>> xrelay-rules >>>\n'
     cat "$tmpd/rules.new"
@@ -2045,10 +2093,14 @@ do_rules() {
   log "  走代理组($GROUP): $cnt_proxy 条   直连: $cnt_direct 条   拒绝: $cnt_reject 条"
   [[ -n $prov ]] && log "  已附带 rule-providers 规则集"
   [[ -n $dnsfix ]] && ok "已修正 DNS: 国内域名与直连流量改用国内 DNS 解析(${RULES_CN_DNS[*]}), 避免被解析到海外 CDN 节点"
+  if [[ -n ${PRIVDOMAIN:-}${PRIVCIDR:-} ]]; then
+    ok "已加入私有组网直连: 域名后缀 ${PRIVDOMAIN:-无}  网段 ${PRIVCIDR:-无}${PRIVDNS:+  (域名由 $PRIVDNS 解析)}"
+  fi
   info "客户端重新拉取订阅即可生效"
   save_env_file "$(xrel_dir)/rules.env" \
     "$(kv DATE "$(date '+%F %T')")" \
-    "$(kv RULESFILE "$RULESFILE")" "$(kv GROUP "$GROUP")" "$(kv AGS_DIR "$AGS_DIR")"
+    "$(kv RULESFILE "$RULESFILE")" "$(kv GROUP "$GROUP")" "$(kv AGS_DIR "$AGS_DIR")" \
+    "$(kv PRIVDOMAIN "${PRIVDOMAIN:-}")" "$(kv PRIVDNS "${PRIVDNS:-}")" "$(kv PRIVCIDR "${PRIVCIDR:-}")"
   rm -rf "$tmpd"
   ok "原始规则已备份到 $target.rules-orig, 卸载时会自动恢复"
 }
@@ -2056,6 +2108,12 @@ do_rules() {
 do_menu_rules() {
   log " 用内置或外部订阅的规则段, 补充/替换本机订阅的分流规则:"
   askv GROUP "规则里代理流量的目标组名(需是本机订阅已有的组)" "🌍选择代理节点"
+  log " 可选: 私有组网(如 Tailscale)直连; 直接回车 = 沿用上次设置(首次则不设置)"
+  askv PRIVDOMAIN "组网自定义域名后缀, 逗号分隔(如 alpine)" ""
+  if [[ -n $PRIVDOMAIN ]]; then
+    askv PRIVDNS "解析这些域名的 DNS 服务器(如 100.x.x.x)" ""
+    askv PRIVCIDR "组网网段(Tailscale 为 100.64.0.0/10)" "100.64.0.0/10"
+  fi
   do_rules
 }
 
@@ -2261,6 +2319,10 @@ rules 模式参数 (用其他订阅的规则段强化本机订阅):
   GROUP=🌍选择代理节点  规则里原本指向机场代理组的流量, 改指向本机订阅里的这个组
   AGS_DIR=/root/agsbx   argosbx 目录(默认自动检测)
   (同时会修正订阅的 DNS: 国内域名/直连流量改用国内 DNS 解析, 解决国内网站/图片慢或加载不出)
+  私有组网(如 Tailscale)直连, 均可选, 会保存下来, 重跑 rules 自动沿用(清除用 RESET=y 重跑):
+  PRIVDOMAIN=alpine     组网内自定义域名后缀, 逗号分隔; 生成 DOMAIN-SUFFIX 直连规则
+  PRIVDNS=100.x.x.x     解析上述域名的 DNS(组网内设备), 逗号分隔; 写入 nameserver-policy
+  PRIVCIDR=100.64.0.0/10  组网 IP 段, 逗号分隔; 生成置顶的 IP-CIDR 直连规则(no-resolve)
 
 示例:
   落地机:  bash xrelay.sh landing LPORT=443 LSNI=aws.amazon.com NAME=落地
@@ -2268,6 +2330,7 @@ rules 模式参数 (用其他订阅的规则段强化本机订阅):
   中转机:  bash xrelay.sh realm LADDR=1.2.3.4 LPORT=443 RPORT=8443
   中转机:  bash xrelay.sh mirror SUBURL=http://1.2.3.4:35948/123
   中转机:  bash xrelay.sh rules     (零参数使用内置规则集; 也可 RULESFILE=路径或URL)
+           bash xrelay.sh rules PRIVDOMAIN=alpine PRIVDNS=100.x.x.x PRIVCIDR=100.64.0.0/10   (加 Tailscale 组网直连)
 
 说明:
   - relay 模式: 客户端用同一个 地址:端口, 靠两个不同 UUID 区分节点;
